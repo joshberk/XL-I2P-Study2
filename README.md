@@ -69,6 +69,9 @@ enabled, MariaDB 10.6+.
 
 ## Deployment runbook
 
+Three machines: **VM2** (MariaDB + dashboard), **VM1** (crawler + I2P
+router), **VPS** (floodfill sensor). Deploy in that order.
+
 ### VM2 — MariaDB
 
 ```sql
@@ -119,6 +122,20 @@ The service runs `run --resume`, so it attaches to the open epoch after
 any reboot. If no epoch is open it waits for one to be opened (it does not
 die). The first epoch must be opened manually (`epoch open <label>`);
 after that, rollover is automatic — see below.
+
+### VPS — floodfill sensor (Tier 2)
+
+The network-layer half of the cross-layer story runs on a cheap cloud VPS
+with a public IP — the OCRI VMs can never be floodfills (no public IP, no
+inbound). The harvester scans the VPS router's `netDb/` every 6 hours,
+ships JSONL batches to VM2, and the ingest cron loads them into
+`network_observations` as `source_type='vps_floodfill_netdb'`.
+
+Full provisioning runbook — VPS spin-up, Java I2P install, floodfill
+switch, harvester install, VM2 pull + ingest cron, verification — is in
+[`vps_harvester/README.md`](vps_harvester/README.md). **Season the VPS 2–3
+weeks before the measurement window**: week-1 census data is warmup, not
+measurement.
 
 ### Epoch rollover (automatic)
 
