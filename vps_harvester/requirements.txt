@@ -1,0 +1,3 @@
+# netdb_harvester (harvest.py + ship.py) is stdlib-only on purpose:
+# the VPS sensor should have as few dependencies as possible.
+# rsync and openssh-client must be installed via the OS package manager.

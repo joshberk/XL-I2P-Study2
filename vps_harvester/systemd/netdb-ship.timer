@@ -1,0 +1,10 @@
+[Unit]
+Description=Ship VPS netDb batches to VM2 hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=netdb-ship.service
+
+[Install]
+WantedBy=timers.target

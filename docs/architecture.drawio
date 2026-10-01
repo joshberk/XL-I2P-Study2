@@ -1,0 +1,98 @@
+<?xml version="1.0" ?>
+<mxfile host="app.diagrams.net">
+  <diagram name="XL-I2P Study 2 Architecture">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="2" value="&lt;b&gt;&lt;font style=&quot;font-size: 16px&quot;&gt;OCRI RANGE — no public IP&lt;/font&gt;&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#E8F0FE;strokeColor=#1A73E8;fontColor=#000000;strokeWidth=2;spacingLeft=14;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="70" width="880" height="640" as="geometry"/>
+        </mxCell>
+        <mxCell id="3" value="&lt;b&gt;&lt;font style=&quot;font-size: 16px&quot;&gt;HETZNER VPS — public IPv4&lt;/font&gt;&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#E6F4EA;strokeColor=#188038;fontColor=#000000;strokeWidth=2;spacingLeft=14;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="950" y="70" width="420" height="640" as="geometry"/>
+        </mxCell>
+        <mxCell id="4" value="&lt;b&gt;&lt;font style=&quot;font-size: 15px&quot;&gt;VM1 · 192.167.51.178&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;Ubuntu24-054335&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#1A73E8;fontColor=#000000;strokeWidth=2;spacingLeft=14;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="140" width="380" height="550" as="geometry"/>
+        </mxCell>
+        <mxCell id="5" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;I2P router v2.13 (client mode)&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;no floodfill without public IP&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="80" y="200" width="340" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="6" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Hardened crawler loop&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;verify → crawl → pages / links&lt;br&gt;same cohort re-crawled each epoch&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="80" y="300" width="340" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="7" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Cross-layer pass (Tier 1)&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;SAM naming + LeaseSet lookup&lt;br&gt;≤20 sites per cycle&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="80" y="415" width="340" height="95" as="geometry"/>
+        </mxCell>
+        <mxCell id="8" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Local netDb census&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;client-sampled view&lt;br&gt;source_type = 'local_netdb'&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="80" y="525" width="340" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="9" value="&lt;b&gt;&lt;font style=&quot;font-size: 15px&quot;&gt;VM2 · 192.167.48.48&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;Ubuntu24-054336&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#5F6368;fontColor=#000000;strokeWidth=2;spacingLeft=14;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="500" y="140" width="380" height="550" as="geometry"/>
+        </mxCell>
+        <mxCell id="10" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;MariaDB · xl_i2p_study2&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;9 tables · epoch-tagged rows&lt;br&gt;least-privilege users&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="520" y="200" width="340" height="105" as="geometry"/>
+        </mxCell>
+        <mxCell id="11" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Batch ingest (every 30 min)&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;JSONL → network_observations&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="520" y="320" width="340" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="12" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Read-only dashboard&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;LAN / SSH tunnel · token auth&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="520" y="425" width="340" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="13" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Per-epoch exports&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;CSV + SQL dump + SHA-256 manifest&lt;br&gt;immutable, on rollover&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="520" y="530" width="340" height="95" as="geometry"/>
+        </mxCell>
+        <mxCell id="14" value="&lt;b&gt;&lt;font style=&quot;font-size: 15px&quot;&gt;I2P floodfill router&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;Network: OK · i2np.floodfillParticipant&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#188038;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="975" y="140" width="370" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="15" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;netDb harvester (every 6 h)&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;routerInfos + LeaseSets → JSONL&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="975" y="260" width="370" height="95" as="geometry"/>
+        </mxCell>
+        <mxCell id="16" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Batch spool&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;/opt/netdb-harvester/spool/&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FFFFFF;strokeColor=#9AA0A6;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="975" y="375" width="370" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="17" value="&lt;b&gt;&lt;font style=&quot;font-size: 14px&quot;&gt;Warmup note&lt;/font&gt;&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#5F6368&quot;&gt;Weeks 1–3 are integration;&lt;br&gt;census not measurement-grade&lt;br&gt;until the router seasons.&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=top;fillColor=#FEF7E0;strokeColor=#F9AB00;fontColor=#000000;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="975" y="485" width="370" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="18" value="" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#FEF7E0;strokeColor=#F9AB00;fontColor=#000000;strokeWidth=2;spacingLeft=14;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="730" width="1340" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="19" value="&lt;b&gt;Disclosure notes (for the paper)&lt;/b&gt;&lt;br&gt;•  source_type = 'local_netdb' — client-sampled netDb view from the OCRI router (Tier 1); not a full DHT census.&lt;br&gt;•  source_type = 'vps_floodfill_netdb' — full-DHT view from the floodfill sensor (Tier 2); weeks 1–3 are warmup.&lt;br&gt;•  Every row epoch-tagged · 30-day epochs auto-roll with immutable CSV + SQL + SHA-256 exports.&lt;br&gt;•  VM1 → VM2 over internal TCP 3306 (least-privilege users) · VPS → VM2 by hourly rsync pull (inbound blocked)." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="46" y="762" width="1308" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="20" value="proxy :4444" style="text;html=1;fontColor=#5F6368;" vertex="1" parent="1">
+          <mxGeometry x="264" y="284" width="80" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="21" value="" style="endArrow=classic;html=1;strokeColor=#5F6368;strokeWidth=1;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="250" y="285" as="sourcePoint"/>
+            <mxPoint x="250" y="300" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="22" value="" style="endArrow=classic;html=1;strokeColor=#5F6368;strokeWidth=1;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1160" y="240" as="sourcePoint"/>
+            <mxPoint x="1160" y="260" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="23" value="" style="endArrow=classic;html=1;strokeColor=#5F6368;strokeWidth=1;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1160" y="355" as="sourcePoint"/>
+            <mxPoint x="1160" y="375" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="24" value="Tier 1 · TCP 3306" style="endArrow=classic;html=1;strokeColor=#1A73E8;strokeWidth=2;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="440" y="415" as="sourcePoint"/>
+            <mxPoint x="500" y="415" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="25" value="hourly pull&lt;br&gt;rsync / SSH" style="endArrow=classic;html=1;strokeColor=#188038;strokeWidth=2;labelBackgroundColor=#ffffff;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="975" y="420" as="sourcePoint"/>
+            <mxPoint x="880" y="400" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

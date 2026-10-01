@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily XL-I2P Study 2 epoch rollover check
+
+[Timer]
+# Check daily; the rollover itself only fires when the epoch is due.
+OnCalendar=daily
+# If the VM was down at midnight, run on next boot instead of skipping.
+Persistent=true
+Unit=xl-i2p-epoch-rollover.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=XL-I2P Study 2 read-only monitoring dashboard (VM2)
+# Co-resident with MariaDB on VM2, but keep the unit portable: the app
+# retries DB connects per request, so only the network needs to be up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xl-i2p
+Group=xl-i2p
+WorkingDirectory=/opt/xl-i2p
+# Dashboard-only env: read-only DB user + DASHBOARD_TOKEN/HOST/PORT.
+# Keep separate from the crawler .env (different DB credentials).
+EnvironmentFile=/opt/xl-i2p/dashboard.env
+ExecStart=/opt/xl-i2p/.venv/bin/python -m xl_i2p.dashboard
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=XL-I2P Study 2 epoch rollover (close due epoch, open next, export)
+# Must run after the database is reachable; the crawler need not be running.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=xl-i2p
+Group=xl-i2p
+WorkingDirectory=/opt/xl-i2p
+EnvironmentFile=/opt/xl-i2p/.env
+# No-op unless the open epoch reached EPOCH_DURATION_DAYS. The running
+# crawler detects the rollover on its next cycle and switches epochs; it also
+# rolls over by itself as a backstop if this timer ever misses.
+ExecStart=/opt/xl-i2p/.venv/bin/python -m xl_i2p epoch rollover --export-closed

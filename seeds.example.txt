@@ -1,0 +1,6 @@
+# Example seed list — one .i2p hostname per line, no scheme, no path.
+# Lines starting with # and blank lines are ignored.
+# Replace this file with your own seed list for a real campaign.
+# (Study 2 used ~33k hosts carried over from Study 1.)
+identiguy.i2p
+i2p-projekt.i2p

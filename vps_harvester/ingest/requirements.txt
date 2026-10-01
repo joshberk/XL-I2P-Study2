@@ -1,0 +1,2 @@
+# ingest/ingest_netdb.py runs on VM2 and needs a MySQL driver.
+pymysql>=1.1

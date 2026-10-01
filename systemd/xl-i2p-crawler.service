@@ -1,0 +1,35 @@
+[Unit]
+Description=XL-I2P Study 2 longitudinal crawler
+# MariaDB lives on VM2, so there is no local mariadb.service to order after.
+# network-online.target ensures the VM1->VM2 path is up before we start.
+After=network-online.target
+Wants=network-online.target
+# If the I2P router runs as a systemd unit on this host, add it here, e.g.:
+#   After=i2p.service
+# Find the real unit name with: systemctl list-units | grep -i i2p
+# (The crawler also waits for the I2P HTTP proxy internally at startup and
+# skips cycles while it is down, so boot ordering is best-effort, not fatal.)
+# Unattended 4-month run: never stop restarting this service, no matter how
+# often it dies. (These directives belong in [Unit]; systemd ignores them in
+# [Service].)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=xl-i2p
+Group=xl-i2p
+WorkingDirectory=/opt/xl-i2p
+EnvironmentFile=/opt/xl-i2p/.env
+ExecStart=/opt/xl-i2p/.venv/bin/python -m xl_i2p run --resume
+# The crawler contains its own per-site exception handling and the loop
+# survives cycle failures; systemd covers whole-process death.
+Restart=always
+RestartSec=30
+# Logs go to $LOG_DIR as JSON lines via the app; keep journald as backup.
+StandardOutput=journal
+StandardError=journal
+# Unattended 4-month run: allow long, quiet operation.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

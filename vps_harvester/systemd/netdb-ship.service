@@ -1,0 +1,14 @@
+[Unit]
+Description=XL-I2P VPS floodfill sensor: ship JSONL batches to VM2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=i2p-harvest
+Group=i2p-harvest
+WorkingDirectory=/opt/netdb-harvester
+EnvironmentFile=/opt/netdb-harvester/.env
+ExecStart=/usr/bin/python3 -m netdb_harvester.ship
+StandardOutput=journal
+StandardError=journal

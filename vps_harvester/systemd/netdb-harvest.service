@@ -1,0 +1,17 @@
+[Unit]
+Description=XL-I2P VPS floodfill sensor: harvest local netDb to JSONL batches
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Must be able to read the I2P router's netDb/ directory: set User=/Group=
+# to the user that runs the I2P router on this VPS (e.g. i2psvc for the
+# Debian package) if that differs from i2p-harvest.
+User=i2p-harvest
+Group=i2p-harvest
+WorkingDirectory=/opt/netdb-harvester
+EnvironmentFile=/opt/netdb-harvester/.env
+ExecStart=/usr/bin/python3 -m netdb_harvester.harvest
+StandardOutput=journal
+StandardError=journal
