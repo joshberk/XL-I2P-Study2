@@ -64,8 +64,8 @@ enabled, MariaDB 10.6+.
   daily-rotated logs and `heartbeat.json` (also a `heartbeats` DB row).
 - **Floodfill gating** (`xl_i2p/cross_layer.py::harvest_netdb`): netDB
   harvesting is disabled unless `FLOODFILL_MODE=true`. Floodfill needs a
-  public IP + inbound UDP/TCP (Network: OK); the OCRI range network does not
-  provision this, so the default build is client-mode only.
+  public IP + inbound UDP/TCP (Network: OK); our VM1 had no public IP,
+  so the default build is client-mode only.
 
 ## Deployment runbook
 
@@ -126,8 +126,7 @@ after that, rollover is automatic — see below.
 ### VPS — floodfill sensor (Tier 2)
 
 The network-layer half of the cross-layer story runs on a cheap cloud VPS
-with a public IP — the OCRI VMs can never be floodfills (no public IP, no
-inbound). The harvester scans the VPS router's `netDb/` every 6 hours,
+with a public IP — our VM1 had no public IP, so it can never be a floodfill. The harvester scans the VPS router's `netDb/` every 6 hours,
 ships JSONL batches to VM2, and the ingest cron loads them into
 `network_observations` as `source_type='vps_floodfill_netdb'`.
 
@@ -211,10 +210,10 @@ DASHBOARD_PORT=8080
 
 ### Access
 
-- `DASHBOARD_HOST=0.0.0.0` is **range-LAN only**: VM2 has no public IP, so
-  the dashboard is reachable from inside the OCRI range network at
+- `DASHBOARD_HOST=0.0.0.0` is **private-LAN only**: VM2 has no public IP, so
+  the dashboard is reachable from inside the private network at
   `http://192.167.48.48:8080/?token=<token>`.
-- For off-range access (e.g. from a phone outside the range), do NOT expose
+- For off-network access (e.g. from a phone outside the LAN), do NOT expose
   the port — use an SSH tunnel instead:
   `ssh -L 8080:localhost:8080 <vm2-user>@<vm2>`, then open
   `http://localhost:8080/?token=<token>` locally.
@@ -249,10 +248,10 @@ unreadable-dir skip), and the dashboard API.
 
 ## Floodfill / cross-layer netDB harvesting
 
-OCRI refused a public IP, so the OCRI vantage router can never be a
-floodfill. Cross-layer collection therefore runs in two tiers:
+Our VM1 had no public IP, so its I2P router can never be a floodfill — hence
+the separate VPS cloud server for the network-layer census. Cross-layer collection therefore runs in two tiers:
 
-**Tier 1 — client-mode, on OCRI today (no public IP needed).**
+**Tier 1 — client-mode, on VM1 (no public IP needed).**
 - Per-epoch association pass (`xl_i2p/xlayer_pass.py`): every scheduler
   cycle, up to `XLINK_PER_CYCLE_LIMIT` (default 20) REACHABLE/CRAWLED sites
   lacking a cross-layer observation for the current epoch get a SAM naming +
@@ -281,7 +280,7 @@ for weeks before the measurement window** — week-1 census data is warmup.
 `source_type`; the two are never interchangeable.
 
 The old floodfill-gated `harvest_netdb()` (`FLOODFILL_MODE`) remains for a
-future on-site floodfill vantage and stays disabled on OCRI.
+future floodfill-capable vantage host and stays disabled here.
 
 ## License
 

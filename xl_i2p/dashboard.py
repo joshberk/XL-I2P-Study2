@@ -10,7 +10,7 @@ Usage:
 Environment:
     DASHBOARD_TOKEN  bearer/?token= auth; unset = open (trusted LAN only)
     DASHBOARD_HOST   bind address, default 0.0.0.0 (VM2 has no public IP,
-                     so this is range-LAN only)
+                     so this is private-LAN only)
     DASHBOARD_PORT   default 8080
 """
 from __future__ import annotations

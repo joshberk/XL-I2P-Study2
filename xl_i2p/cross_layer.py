@@ -431,9 +431,9 @@ def harvest_netdb(session: Session, epoch_id: int | None = None) -> dict[str, in
     """Harvest router infos from the local netDB directory into network_observations.
 
     DISABLED unless FLOODFILL_MODE=true. Floodfill participation requires a
-    public IP and inbound UDP/TCP reachability; on the OCRI range network the
-    router reports Network: Testing/Firewalled, so harvesting would only see
-    the local client's partial netDB view and is kept off by default.
+    public IP and inbound UDP/TCP reachability; our VM1 had no public IP, so
+    the router reports Network: Testing/Firewalled and harvesting would only
+    see the local client's partial netDB view — kept off by default.
     """
     from .models import NetworkObservation, now
 

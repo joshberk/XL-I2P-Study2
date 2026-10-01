@@ -52,8 +52,8 @@ class Settings:
     user_agent: str = os.getenv("CRAWLER_USER_AGENT", "XL-I2P-Study2/2.0")
     known_test_eepsite: str = os.getenv("KNOWN_TEST_EEPSITE", "http://identiguy.i2p/")
     # Floodfill / netDB harvesting. Disabled by default: floodfill participation
-    # requires a public IP and inbound UDP/TCP reachability, which the OCRI
-    # range network does not provision. Enable only after Network: OK.
+    # requires a public IP and inbound UDP/TCP reachability, which our VM1
+    # did not have. Enable only after Network: OK on a publicly reachable host.
     floodfill_mode: bool = _bool("FLOODFILL_MODE", False)
 
     # --- Epoch ---
@@ -111,8 +111,8 @@ class Settings:
     # Bearer/?token= auth for the dashboard. Empty = open access; only leave
     # empty on a trusted internal network.
     dashboard_token: str = os.getenv("DASHBOARD_TOKEN", "")
-    # 0.0.0.0 is range-LAN only: VM2 has no public IP. Prefer 127.0.0.1 and
-    # reach it via SSH port-forward from outside the range.
+    # 0.0.0.0 is private-LAN only: VM2 has no public IP. Prefer 127.0.0.1 and
+    # reach it via SSH port-forward from outside the LAN.
     dashboard_host: str = os.getenv("DASHBOARD_HOST", "0.0.0.0")
     dashboard_port: int = _int("DASHBOARD_PORT", 8080)
 

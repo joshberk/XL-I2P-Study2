@@ -6,14 +6,13 @@ router's `netDb/` directory (router infos + leaseSets), writes JSONL batches,
 ships them to the Study 2 MariaDB host (VM2) over rsync/SSH, where
 `ingest/ingest_netdb.py` loads them into `network_observations`.
 
-This exists because the OCRI range network refused a public IP, so the OCRI
-vantage router can never be a floodfill. The 4-month application-layer crawl
-is unaffected and stays on OCRI; this sensor supplies the network-layer half
-of the cross-layer story.
+This exists because our VM1 had no public IP, so its I2P router can never
+be a floodfill. The 4-month application-layer crawl is unaffected and stays
+on VM1; this sensor supplies the network-layer half of the cross-layer story.
 
 **Source-type discipline (load-bearing for the dissertation's disclosure):**
 - `vps_floodfill_netdb` — full-DHT view from this floodfill sensor.
-- `local_netdb` — client-sampled view from the OCRI vantage router's own
+- `local_netdb` — client-sampled view from the VM1 vantage router's own
   netDb store (recorded by the crawler itself, Tier 1).
 Analysis must always filter on `source_type`; the two are never interchangeable.
 
@@ -142,7 +141,7 @@ Edit `.env`:
 NETDB_DIR=/var/lib/i2p/i2p-config/netDb   # verify with: ls <that dir>
 SPOOL_DIR=/var/spool/netdb-harvester
 SENSOR_ID=vps-ff-01
-# leave VM2_* unset — the VPS cannot reach VM2 (no public IP on the range),
+# leave VM2_* unset — the VPS cannot reach VM2 (no public IP on VM2's network),
 # so the push ship timer stays OFF (see Phase 7)
 ```
 ```bash
@@ -177,10 +176,10 @@ re-pulled files are safe.
 
 ### Phase 7B — manual transfer (if VM2 has no outbound internet)
 1. On your laptop: `scp -r root@<VPS-IP>:/var/spool/netdb-harvester/ ./netdb-batches/`
-2. Move the new `batch-*.jsonl` files into VM2 via the OCRI portal file
-   transfer, into `/var/spool/netdb-vps/` (create it per Phase 7A).
+2. Move the new `batch-*.jsonl` files into VM2 via your hosting console's
+   file transfer, into `/var/spool/netdb-vps/` (create it per Phase 7A).
 3. The VM2 ingest cron (below) picks them up. Repeat weekly — or revisit
-   7A if the range admins ever allow outbound.
+   7A if the network admins ever allow outbound.
 
 ### Phase 8 — verify, then walk away
 1. On the VPS: `systemctl list-timers | grep netdb` shows the harvest timer;

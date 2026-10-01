@@ -7,7 +7,7 @@ already exists.
 
 Source-type discipline (load-bearing for the dissertation's disclosure):
 - 'vps_floodfill_netdb' — full-DHT view from the VPS floodfill sensor (this script).
-- 'local_netdb'         — client-sampled view from the OCRI vantage router
+- 'local_netdb'         — client-sampled view from the VM1 vantage router
                           (recorded by the crawler itself, Tier 1).
 Never mix them: analysis must filter on source_type.
 
