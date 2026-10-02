@@ -386,22 +386,40 @@ def _render(stats: dict | None, token_param: str) -> str:
             )
         return "".join(cells)
 
-    def _err_rows() -> str:
+    def _err_bars() -> str:
         rows = (s.get("this_epoch") or {}).get("error_top5") or []
         if not rows:
-            return '<tr><td colspan="2" class="muted">no errors this epoch</td></tr>'
-        return "".join(
-            f'<tr><td class="mono">{r[0]}</td><td class="num" id="err-{r[0]}">{r[1]}</td></tr>'
-            for r in rows
-        )
+            return '<p class="muted">no errors this epoch</p>'
+        mx = max(r[1] for r in rows) or 1
+        out = []
+        for name, cnt in rows:
+            w = max(2, int(cnt / mx * 100))
+            out.append(
+                f'<div class="stat"><span class="mono">{name}</span><b>{cnt}</b></div>'
+                f'<div class="bar"><i style="width:{w}%"></i></div>'
+            )
+        return "".join(out)
 
-    def _xl_rows(mapping: dict) -> str:
+    def _xl_clo_rows(mapping: dict) -> str:
         if not mapping:
-            return '<tr><td colspan="2" class="muted">—</td></tr>'
+            return '<div class="stat"><span class="muted">—</span><span></span></div>'
         return "".join(
-            f'<tr><td class="mono">{k}</td><td class="num">{v}</td></tr>'
+            f'<div class="stat"><span class="mono">{k}</span><b>{v}</b></div>'
             for k, v in sorted(mapping.items())
         )
+
+    def _xl_net_bars(mapping: dict) -> str:
+        if not mapping:
+            return '<p class="muted">—</p>'
+        mx = max(mapping.values()) or 1
+        out = []
+        for k, v in sorted(mapping.items()):
+            w = max(2, int(v / mx * 100))
+            out.append(
+                f'<div class="stat"><span class="mono">{k}</span><b>{v}</b></div>'
+                f'<div class="bar teal"><i style="width:{w}%"></i></div>'
+            )
+        return "".join(out)
 
     def _beats() -> str:
         rows = health.get("heartbeats") or []
@@ -448,11 +466,13 @@ def _render(stats: dict | None, token_param: str) -> str:
     html = html.replace("__PAGES__", str((s.get("this_epoch") or {}).get("pages_fetched", "—")))
     html = html.replace("__LINKS__", str((s.get("this_epoch") or {}).get("links_found", "—")))
     html = html.replace("__NEW_SITES__", str((s.get("this_epoch") or {}).get("new_sites", "—")))
-    html = html.replace("__ERROR_ROWS__", _err_rows())
-    html = html.replace("__XL_CLO_EPOCH__", _xl_rows(xl_epoch.get("cross_layer_observations") or {}))
-    html = html.replace("__XL_NET_EPOCH__", _xl_rows(xl_epoch.get("network_observations") or {}))
+    html = html.replace("__ERROR_BARS__", _err_bars())
+    html = html.replace("__XL_CLO_ROWS__", _xl_clo_rows(xl_epoch.get("cross_layer_observations") or {}))
+    html = html.replace("__XL_NET_BARS__", _xl_net_bars(xl_epoch.get("network_observations") or {}))
     html = html.replace("__XL_CLO_CUM__", str(xl_cum.get("cross_layer_observations", 0)))
     html = html.replace("__XL_NET_CUM__", str(xl_cum.get("network_observations", 0)))
+    html = html.replace("__REACHABLE_N__", str(by_state.get(SiteState.REACHABLE.value, 0)))
+    html = html.replace("__CRAWLED_N__", str(by_state.get(SiteState.CRAWLED.value, 0)))
     html = html.replace("__CHURN_HTML__", churn_html)
     html = html.replace("__BEAT_ROWS__", _beats())
     html = html.replace("__STUCK_COUNT__", str(stuck.get("count", 0)))
@@ -477,77 +497,96 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>XL-I2P Study 2 — Dashboard</title>
 <style>
-body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:12px;background:#101418;color:#e8edf2;max-width:720px;margin-inline:auto}
-h1{font-size:1.15rem;margin:.2rem 0}
-h2{font-size:.95rem;margin:1.1rem 0 .4rem;color:#9fb3c8;text-transform:uppercase;letter-spacing:.04em}
-.card{background:#1a2129;border-radius:10px;padding:12px;margin-bottom:10px}
-.row{display:flex;justify-content:space-between;padding:3px 0;font-size:.9rem}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:14px;background:#0d1424;color:#e6ecf5;max-width:1100px;margin-inline:auto}
+h2{font-size:.72rem;margin:0 0 10px;color:#9fb0c9;text-transform:uppercase;letter-spacing:.09em}
+.topbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.title{font-size:1.35rem;font-weight:700;margin-right:auto}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:.8rem;font-weight:700;padding:6px 14px;border-radius:20px;border:1px solid}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+.pill.ok{color:#2ecc71;border-color:#2ecc71;background:rgba(46,204,113,.12)}
+.pill.ok .dot{animation:pulse 2s infinite}
+.pill.warn{color:#f5a623;border-color:#f5a623;background:rgba(245,166,35,.12)}
+.pill.bad{color:#e74c3c;border-color:#e74c3c;background:rgba(231,76,60,.12)}
+.pill.muted{color:#8a99a8;border-color:#8a99a8;background:rgba(138,153,168,.12)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.chip{font-size:.78rem;color:#9fb0c9;background:#16203a;padding:6px 14px;border-radius:20px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+.kpi{background:#16203a;border-radius:12px;padding:14px}
+.kpi .v{font-size:1.7rem;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:.75rem;color:#9fb0c9;margin-top:3px}
+.card{background:#16203a;border-radius:12px;padding:16px;margin-bottom:12px}
+.cohort-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.cell{background:#0d1424;border-radius:8px;padding:10px;text-align:center}
+.cell .k{font-size:.66rem;color:#9fb0c9;display:block}
+.cell .v{font-size:1.15rem;font-weight:700;font-variant-numeric:tabular-nums}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.stat{display:flex;justify-content:space-between;font-size:.85rem;padding:3px 0}
+.stat b{font-variant-numeric:tabular-nums}
+.bar{height:8px;border-radius:4px;background:#0d1424;margin:4px 0 10px;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:4px;background:#e74c3c}
+.bar.teal i{background:#2dd4bf}
+.mono{font-family:ui-monospace,monospace;font-size:.8rem;word-break:break-all}
 .muted{color:#8a99a8}
-.mono{font-family:ui-monospace,monospace;font-size:.82rem;word-break:break-all}
-.num{text-align:right;font-variant-numeric:tabular-nums}
-.ok{color:#4ade80}.warn{color:#fbbf24}.bad{color:#f87171}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:6px}
-.cell{background:#232c36;border-radius:8px;padding:8px;display:flex;flex-direction:column}
-.cell .k{font-size:.68rem;color:#9fb3c8}
-.cell .v{font-size:1.05rem;font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:.85rem}
-td,th{padding:4px 6px;border-bottom:1px solid #2a3440;text-align:left}
-#updated{font-size:.75rem;color:#8a99a8}
+td,th{padding:5px 6px;border-bottom:1px solid #22304f;text-align:left}
+th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.foot{font-size:.75rem;color:#8a99a8;text-align:center;margin-top:2px}
+@media (max-width:700px){.kpis{grid-template-columns:repeat(2,1fr)}.cohort-grid{grid-template-columns:repeat(3,1fr)}.cols{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<h1>XL-I2P Study 2 <span id="updated"></span></h1>
+<div class="topbar">
+  <div class="title">XL-I2P Study 2</div>
+  <span class="pill __LIVE_CLASS__" id="live-pill"><span class="dot"></span><b id="live-status">__LIVE_STATUS__</b></span>
+  <span class="chip">epoch <b class="mono" id="epoch-label">__EPOCH_LABEL__</b> &middot; <span id="epoch-age">__AGE_DAYS__ days</span> old &middot; rollover in <span id="epoch-roll">__ROLLOVER_DAYS__</span>d</span>
+  <span class="chip">last beat <span id="live-seen">__LIVE_SEEN__</span></span>
+</div>
 
-<div class="card">
-<h2>Crawler</h2>
-<div class="row"><span>Liveness</span><b class="__LIVE_CLASS__" id="live-status">__LIVE_STATUS__</b></div>
-<div class="row"><span>Last heartbeat</span><span id="live-seen">__LIVE_SEEN__</span></div>
-<div class="row"><span>Open epoch</span><b class="mono" id="epoch-label">__EPOCH_LABEL__</b></div>
-<div class="row"><span>Epoch age</span><span id="epoch-age">__AGE_DAYS__ days</span></div>
-<div class="row"><span>Days until auto-rollover</span><span id="epoch-roll">__ROLLOVER_DAYS__</span></div>
+<div class="kpis">
+  <div class="kpi"><div class="v" id="verify-n">__VERIFY__</div><div class="l">verify attempts &middot; <span id="verify-rate">__VERIFY_RATE__</span> ok</div></div>
+  <div class="kpi"><div class="v" id="crawl-n">__CRAWL__</div><div class="l">crawl attempts &middot; <span id="crawl-rate">__CRAWL_RATE__</span> ok</div></div>
+  <div class="kpi"><div class="v" id="pages-n">__PAGES__</div><div class="l">pages fetched &middot; <span id="links-n">__LINKS__</span> links</div></div>
+  <div class="kpi"><div class="v"><span id="kpi-reachable">__REACHABLE_N__</span> / <span id="kpi-crawled">__CRAWLED_N__</span></div><div class="l">reachable / crawled sites</div></div>
 </div>
 
 <div class="card">
-<h2>Cohort (<span id="cohort-total">__COHORT_TOTAL__</span> sites)</h2>
-<div class="grid">__STATE_CELLS__</div>
+  <h2>Cohort &mdash; <span id="cohort-total">__COHORT_TOTAL__</span> sites &middot; <span id="new-sites">__NEW_SITES__</span> discovered this epoch</h2>
+  <div class="cohort-grid">__STATE_CELLS__</div>
+</div>
+
+<div class="cols">
+  <div class="card">
+    <h2>Error taxonomy (top 5)</h2>
+    __ERROR_BARS__
+  </div>
+  <div class="card">
+    <h2>Cross-layer</h2>
+    <div class="stat"><span>LeaseSet obs (epoch)</span><span></span></div>
+    __XL_CLO_ROWS__
+    <div class="stat" style="margin-top:8px"><span>Network obs by source (epoch)</span><span></span></div>
+    __XL_NET_BARS__
+    <div class="stat"><span>Cumulative cross-layer obs</span><b id="xl-clo-cum">__XL_CLO_CUM__</b></div>
+    <div class="stat"><span>Cumulative network obs</span><b id="xl-net-cum">__XL_NET_CUM__</b></div>
+  </div>
 </div>
 
 <div class="card">
-<h2>This epoch</h2>
-<div class="row"><span>Verify attempts</span><b id="verify-n">__VERIFY__</b></div>
-<div class="row"><span>Verify success rate</span><b id="verify-rate">__VERIFY_RATE__</b></div>
-<div class="row"><span>Crawl attempts</span><b id="crawl-n">__CRAWL__</b></div>
-<div class="row"><span>Crawl success rate</span><b id="crawl-rate">__CRAWL_RATE__</b></div>
-<div class="row"><span>Pages fetched</span><b id="pages-n">__PAGES__</b></div>
-<div class="row"><span>Links found</span><b id="links-n">__LINKS__</b></div>
-<div class="row"><span>New sites discovered</span><b id="new-sites">__NEW_SITES__</b></div>
-<h2>Error taxonomy (top 5)</h2>
-<table><tbody id="err-body">__ERROR_ROWS__</tbody></table>
+  <h2>Churn</h2>
+  __CHURN_HTML__
 </div>
 
 <div class="card">
-<h2>Cross-layer</h2>
-<div class="row"><span>LeaseSet observations (epoch)</span><b id="xl-clo">see below</b></div>
-<table><tbody id="xl-clo-body">__XL_CLO_EPOCH__</tbody></table>
-<div class="row"><span>Network observations (epoch)</span><b></b></div>
-<table><tbody id="xl-net-body">__XL_NET_EPOCH__</tbody></table>
-<div class="row"><span>Cumulative cross-layer obs</span><b id="xl-clo-cum">__XL_CLO_CUM__</b></div>
-<div class="row"><span>Cumulative network obs</span><b id="xl-net-cum">__XL_NET_CUM__</b></div>
+  <h2>Health</h2>
+  <div class="stat"><span>Stuck sites (VERIFYING/CRAWLING &gt; stale)</span><b id="stuck-n">__STUCK_COUNT__</b></div>
+  <div class="stat"><span class="mono muted" id="stuck-hosts">__STUCK_HOSTS__</span><span></span></div>
+  <h2 style="margin-top:12px">Recent heartbeats</h2>
+  <table><thead><tr><th>At</th><th>Phase</th><th class="num">Cycles</th></tr></thead>
+  <tbody id="beat-body">__BEAT_ROWS__</tbody></table>
 </div>
 
-<div class="card">
-<h2>Churn</h2>
-__CHURN_HTML__
-</div>
-
-<div class="card">
-<h2>Health</h2>
-<div class="row"><span>Stuck sites (VERIFYING/CRAWLING &gt; stale)</span><b id="stuck-n">__STUCK_COUNT__</b></div>
-<div class="row"><span class="mono muted" id="stuck-hosts">__STUCK_HOSTS__</span><span></span></div>
-<h2>Recent heartbeats</h2>
-<table><thead><tr><th>At</th><th>Phase</th><th class="num">Cycles</th></tr></thead>
-<tbody id="beat-body">__BEAT_ROWS__</tbody></table>
-</div>
+<div class="foot" id="updated"></div>
 
 <script>
 const TOKEN_QS = "__TOKEN_QS__";
@@ -555,11 +594,13 @@ let boot = __STATS_JSON__;
 function qs(){ return TOKEN_QS ? "?token=" + encodeURIComponent(TOKEN_QS) : ""; }
 function set(id, v){ const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.textContent = v; }
 function pct(r){ return r == null ? "—" : (r*100).toFixed(1) + "%"; }
+function pillClass(s){ return "pill " + ({ALIVE:"ok",STALE:"warn",DEAD:"bad"}[s] || "muted"); }
 function apply(s){
   const e = s.epoch || {}, t = s.this_epoch || {}, c = s.cohort || {},
         bs = c.by_state || {}, l = s.liveness || {}, xl = s.cross_layer || {},
-        xle = xl.this_epoch || {}, xlc = xl.cumulative || {},
-        ch = s.churn || {}, h = s.health || {}, st = h.stuck_sites || {};
+        xlc = xl.cumulative || {}, ch = s.churn || {}, h = s.health || {}, st = h.stuck_sites || {};
+  const pill = document.getElementById("live-pill");
+  if (pill) pill.className = pillClass(l.status);
   set("live-status", l.status);
   set("live-seen", l.last_seen ? new Date(l.last_seen + "Z").toLocaleString() : "never");
   set("epoch-label", e.label || "none");
@@ -567,6 +608,8 @@ function apply(s){
   set("epoch-roll", e.days_until_rollover ?? "—");
   set("cohort-total", c.total ?? 0);
   for (const k in bs) set("st-" + k, bs[k]);
+  set("kpi-reachable", bs["REACHABLE"] ?? 0);
+  set("kpi-crawled", bs["CRAWLED"] ?? 0);
   set("verify-n", t.verify_attempts ?? "—");
   set("verify-rate", pct(t.verify_success_rate));
   set("crawl-n", t.crawl_attempts ?? "—");
@@ -579,7 +622,7 @@ function apply(s){
   set("stuck-n", st.count ?? 0);
   if (ch.available){ set("churn-new", ch.newly_reachable); set("churn-lost", ch.lost); }
   const up = document.getElementById("updated");
-  if (up && s.generated_at) up.textContent = "· " + new Date(s.generated_at + "Z").toLocaleTimeString();
+  if (up && s.generated_at) up.textContent = "updated " + new Date(s.generated_at + "Z").toLocaleTimeString();
 }
 if (boot && boot.generated_at) apply(boot);
 async function refresh(){
