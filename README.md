@@ -9,24 +9,27 @@ confirmed failure mode fixed (see the "What changed vs Study 1" section below).
 
 | Host | Role | Address (example) |
 |---|---|---|
-| VM1 | Crawler + I2P router (Java I2P, HTTP proxy `127.0.0.1:4444`) | 192.167.51.178 |
+| VM1 | Crawler; local I2P router kept for SAM LeaseSet lookups + client-sampled netDb census | 192.167.51.178 |
 | VM2 | MariaDB + data analysis | 192.167.48.48 |
+| VPS | I2P router (public IP, floodfill) — HTTP egress for the crawl (via SSH tunnel) + floodfill netDb sensor | 46.62.224.1 |
 
 The crawler on VM1 writes **live** to MariaDB on VM2 over the internal
 subnet (TCP 3306). Per-epoch immutable exports (CSV + optional SQL dump +
-SHA-256 manifest) are frozen on VM2 for analysis. The I2P router stays on
-VM1 only.
+SHA-256 manifest) are frozen on VM2 for analysis. The crawler's HTTP
+fetches egress through the VPS router's HTTP proxy over a persistent SSH
+tunnel (see "Crawl egress" below); VM1's own I2P router is retained only
+for SAM LeaseSet lookups and its client-sampled netDb census.
 
 **Repository layout**
 
 ```
-xl_i2p/            # Tier 1: crawler + read-only dashboard (xl_i2p/dashboard.py)
+xl_i2p/            # crawler + read-only dashboard (xl_i2p/dashboard.py)
 tests/             # 62 tests, no real network (httpx mocked, SQLite)
 systemd/           # crawler, dashboard, and epoch-rollover units
 schema.sql         # MariaDB schema (9 tables + 2 views)
 .env.example       # copy to .env — every setting documented, sane defaults
 requirements.txt   # Python 3.10+
-vps_harvester/     # Tier 2: VPS floodfill netDb sensor (own README + tests)
+vps_harvester/     # VPS floodfill netDb sensor (own README + tests)
 docs/              # architecture diagram (png + editable drawio)
 seeds.example.txt  # seed-file format: one .i2p host per line
 ```
@@ -69,8 +72,9 @@ enabled, MariaDB 10.6+.
 
 ## Deployment runbook
 
-Three machines: **VM2** (MariaDB + dashboard), **VM1** (crawler + I2P
-router), **VPS** (floodfill sensor). Deploy in that order.
+Three machines: **VM2** (MariaDB + dashboard), **VM1** (crawler + local
+I2P router), **VPS** (floodfill sensor + HTTP egress for the crawl).
+Deploy in that order.
 
 ### VM2 — MariaDB
 
@@ -92,7 +96,7 @@ Firewall: allow TCP 3306 **from 192.167.51.178 only**, e.g.
 Then load the schema: `mysql xl_i2p_study2 < schema.sql`
 (or `python -m xl_i2p db init` from VM1 once connectivity works).
 
-### VM1 — crawler + I2P
+### VM1 — crawler (+ local I2P router)
 
 ```bash
 sudo useradd -r -m -s /bin/bash xl-i2p
@@ -106,9 +110,11 @@ sudo -u xl-i2p cp /opt/xl-i2p/.env.example /opt/xl-i2p/.env
 # then edit /opt/xl-i2p/.env: DB_HOST=<VM2 internal IP>, DB_PASSWORD=...
 ```
 
-1. Let the I2P router integrate first: wait until the console shows
-   **Network: OK** (or stable with traffic), thousands of known peers.
-   Do **not** start the 4-month clock on a fresh `Testing` router.
+1. VM1's own router no longer carries crawl traffic — it only serves SAM
+   LeaseSet lookups and the client-sampled netDb census — so the crawl does
+   not wait on its integration. What gates the measurement window: the VPS
+   router seasoned 2–3 weeks (Network: OK, stable peer count) and the SSH
+   tunnel healthy (step 4 below).
 2. `python -m xl_i2p proxy check` — proxy must be OK.
 3. Import seeds: `python -m xl_i2p seeds import seeds.txt`
 4. Open epoch 1: `python -m xl_i2p epoch open 2026-Q4`
@@ -123,7 +129,7 @@ any reboot. If no epoch is open it waits for one to be opened (it does not
 die). The first epoch must be opened manually (`epoch open <label>`);
 after that, rollover is automatic — see below.
 
-### VPS — floodfill sensor (Tier 2)
+### VPS — floodfill sensor + crawl egress
 
 The network-layer half of the cross-layer story runs on a cheap cloud VPS
 with a public IP — our VM1 had no public IP, so it can never be a floodfill. The harvester scans the VPS router's `netDb/` every 6 hours,
@@ -136,14 +142,21 @@ switch, harvester install, VM2 pull + ingest cron, verification — is in
 weeks before the measurement window**: week-1 census data is warmup, not
 measurement.
 
-### Shakedown: crawl via the VPS proxy (optional, temporary)
+### Crawl egress: via the VPS router (SSH tunnel)
 
-A freshly restarted VM1 router can take days to build client tunnels
-(0 client tunnels → 0% crawl success). During shakedown only, the
-crawler's HTTP fetches can ride the VPS router's tunnels through an SSH
-tunnel — no code changes, one env var. **Revert before the formal
-measurement epoch**, or the Tier 1 client-mode vantage and the Tier 2
-floodfill vantage collapse into one.
+VM1's router never got a public IP and stayed `Testing`/NAT'd, so the
+crawler's HTTP fetches ride the VPS router's tunnels through a persistent
+SSH tunnel — no code changes, one env var.
+
+**Measurement-vantage disclosure.** All reachability measurements
+(`crawl_attempts`, pages, links) are single-vantage: the VPS router. The
+floodfill census (`vps_floodfill_netdb`) comes from that same router's
+network position, so crawl observations and floodfill observations are
+*not* independent vantages. What stays dual-source is the
+network-observation layer: VM1's client-sampled netDb view
+(`local_netdb`) vs the VPS floodfill's DHT view
+(`vps_floodfill_netdb`) — genuinely different sensors, analyzed
+separately (see "Source-type discipline" below).
 
 1. On VM1, generate a dedicated key as the crawler user and note its
    fingerprint:
@@ -158,10 +171,8 @@ floodfill vantage collapse into one.
    should return HTTP headers.
 5. Set `I2P_HTTP_PROXY=http://127.0.0.1:4445` in the crawler `.env` — put
    any comment on its own line, systemd env files do not strip trailing
-   comments — and restart the crawler.
-
-Revert: `I2P_HTTP_PROXY=http://127.0.0.1:4444`, restart the crawler,
-`systemctl disable --now` the tunnel service.
+   comments — and restart the crawler. This is the permanent data path,
+   not a shakedown workaround.
 
 ### Epoch rollover (automatic)
 
@@ -274,10 +285,10 @@ python -m xl_i2p --version
 
 ## Tests
 
-`python -m pytest tests/ -q` — 52 tests, no real network (httpx mocked,
+`python -m pytest tests/ -q` — 62 tests, no real network (httpx mocked,
 SQLite). Covers janitor recovery, backoff, taxonomy, epoch tagging and
 rollover, seed dedup, page-cap strictness, kill-mid-cycle restart
-simulation, the Tier 1 cross-layer loop (association pass selection,
+simulation, the cross-layer association loop (pass selection,
 SAM-down degradation, per-site error isolation, local netDb census dedup
 and malformed-file handling), netDb path resolution (override, fallback,
 unreadable-dir skip), and the dashboard API.
@@ -285,17 +296,20 @@ unreadable-dir skip), and the dashboard API.
 ## Floodfill / cross-layer netDB harvesting
 
 Our VM1 had no public IP, so its I2P router can never be a floodfill — hence
-the separate VPS cloud server for the network-layer census. Cross-layer collection therefore runs in two tiers:
+the separate VPS cloud server, which also carries the crawler's HTTP
+egress (see "Crawl egress" above). Network-layer collection therefore
+runs on two sensors:
 
-**Tier 1 — client-mode, on VM1 (no public IP needed).**
-- Per-epoch association pass (`xl_i2p/xlayer_pass.py`): every scheduler
+**VM1 router — SAM lookups + client-sampled netDb census (no public IP needed).**
+- Per-cycle association pass (`xl_i2p/xlayer_pass.py`): every scheduler
   cycle, up to `XLINK_PER_CYCLE_LIMIT` (default 20) REACHABLE/CRAWLED sites
   lacking a cross-layer observation for the current epoch get a SAM naming +
-  LeaseSet lookup, persisted with `source_detail='epoch-loop:…'` and the
-  epoch tagged. Degrades gracefully when SAM is down. Toggle with
-  `XLINK_ENABLED`. Manual run: `python -m xl_i2p xlayer pass`.
+  LeaseSet lookup against VM1's router, persisted with
+  `source_detail='epoch-loop:…'` and the epoch tagged. Degrades gracefully
+  when SAM is down. Toggle with `XLINK_ENABLED`. Manual run:
+  `python -m xl_i2p xlayer pass`.
 - Local netDb census (`cross_layer.census_local_netdb`): one
-  `NetworkObservation` per router in the vantage router's own netDb store,
+  `NetworkObservation` per router in VM1's own netDb store,
   `source_type='local_netdb'`, with the sampled-view disclosure in
   `source_detail`. Runs at most every `NETDB_CENSUS_INTERVAL_SECONDS`
   (default 86400). Manual run: `python -m xl_i2p cross-layer census-local-netdb`.
@@ -303,7 +317,7 @@ the separate VPS cloud server for the network-layer census. Cross-layer collecti
   different OS user than the crawler (e.g. `I2P_NETDB_DIR=/home/administrator/.i2p/netDb`);
   the crawler user needs read+traverse rights on that directory.
 
-**Tier 2 — VPS floodfill sensor** (`vps_harvester/`, separate zip): a cheap
+**VPS — floodfill sensor** (`vps_harvester/`, separate zip): a cheap
 cloud VM with a public IP runs I2P as floodfill; `netdb_harvester/harvest.py`
 scans netDb → JSONL batches (6-hour timer), `ship.py` rsyncs them to VM2
 (hourly), and `ingest/ingest_netdb.py` loads them into
@@ -311,8 +325,8 @@ scans netDb → JSONL batches (6-hour timer), `ship.py` rsyncs them to VM2
 `vps_harvester/README.md` for the provisioning runbook. **Season the VPS
 for weeks before the measurement window** — week-1 census data is warmup.
 
-**Source-type discipline:** `local_netdb` (Tier 1, client-sampled) vs
-`vps_floodfill_netdb` (Tier 2, full DHT). Analysis must filter on
+**Source-type discipline:** `local_netdb` (VM1 client-sampled) vs
+`vps_floodfill_netdb` (VPS floodfill, full DHT). Analysis must filter on
 `source_type`; the two are never interchangeable.
 
 The old floodfill-gated `harvest_netdb()` (`FLOODFILL_MODE`) remains for a
