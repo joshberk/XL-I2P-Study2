@@ -1,0 +1,13 @@
+[
+  "tests/test_harvester.py::test_b64_to_b32_host_roundtrip",
+  "tests/test_harvester.py::test_harvest_incremental_cursor",
+  "tests/test_harvester.py::test_harvest_missing_netdb_dir",
+  "tests/test_harvester.py::test_ingest_inserts_and_dedupes",
+  "tests/test_harvester.py::test_ingest_no_open_epoch_uses_null",
+  "tests/test_harvester.py::test_ingest_skips_bad_lines",
+  "tests/test_harvester.py::test_parse_leaseset_expiry_heuristic",
+  "tests/test_harvester.py::test_parse_routerinfo_extracts_metadata",
+  "tests/test_harvester.py::test_parse_routerinfo_truncated_never_raises",
+  "tests/test_harvester.py::test_ship_failure_not_marked_shipped",
+  "tests/test_harvester.py::test_ship_only_new_batches_with_fake_rsync"
+]

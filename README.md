@@ -136,6 +136,33 @@ switch, harvester install, VM2 pull + ingest cron, verification — is in
 weeks before the measurement window**: week-1 census data is warmup, not
 measurement.
 
+### Shakedown: crawl via the VPS proxy (optional, temporary)
+
+A freshly restarted VM1 router can take days to build client tunnels
+(0 client tunnels → 0% crawl success). During shakedown only, the
+crawler's HTTP fetches can ride the VPS router's tunnels through an SSH
+tunnel — no code changes, one env var. **Revert before the formal
+measurement epoch**, or the Tier 1 client-mode vantage and the Tier 2
+floodfill vantage collapse into one.
+
+1. On VM1, generate a dedicated key as the crawler user and note its
+   fingerprint:
+   `ssh-keygen -t ed25519 -f ~/.ssh/vps_tunnel -N "" -C "vm1-crawler-tunnel"`
+2. Append the public key to the VPS login user's `~/.ssh/authorized_keys`,
+   then verify with `ssh-keygen -l -f`: the fingerprint must match VM1's
+   before going further.
+3. On VM1, run a persistent tunnel forwarding `127.0.0.1:4445` to the
+   VPS's `127.0.0.1:4444` (the VPS proxy port stays localhost-only, never
+   exposed to the internet).
+4. Verify: `curl -x http://127.0.0.1:4445 -I http://i2p-projekt.i2p/`
+   should return HTTP headers.
+5. Set `I2P_HTTP_PROXY=http://127.0.0.1:4445` in the crawler `.env` — put
+   any comment on its own line, systemd env files do not strip trailing
+   comments — and restart the crawler.
+
+Revert: `I2P_HTTP_PROXY=http://127.0.0.1:4444`, restart the crawler,
+`systemctl disable --now` the tunnel service.
+
 ### Epoch rollover (automatic)
 
 Epochs roll automatically every `EPOCH_DURATION_DAYS` (default 30):
