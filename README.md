@@ -212,6 +212,13 @@ Numbers auto-refresh every 60s; no external assets (renders over a slow link).
 `/api/stats` returns the same numbers as JSON for programmatic checks;
 `/healthz` is an unauthenticated DB-connectivity probe.
 
+**Research archive** (`/research`): a second, history-oriented page for analysis
+instead of operations — cumulative "ever reachable / ever crawled" counters,
+cohort lifetime reach, a per-epoch ledger (lost vs newly reachable), a survival
+curve, the discovery funnel, flap leaders (most alive↔dead transitions), and a
+per-site timeline lookup that replaces routine SQL lookups. Same token auth,
+same service; `/api/research` and `/api/research/site?host=` serve its JSON.
+
 ### Install on VM2
 
 1. Create a **read-only** MariaDB user (least privilege):

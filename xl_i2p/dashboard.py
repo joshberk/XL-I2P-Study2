@@ -18,6 +18,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
@@ -359,6 +360,41 @@ def create_app(token: str | None = None) -> Flask:
             stats = None
         return _render(stats, token_param=request.args.get("token", ""))
 
+    @app.get("/api/research")
+    def api_research():
+        try:
+            return jsonify(collect_research())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("research stats collection failed: %s", exc)
+            return jsonify({"error": "research stats unavailable", "detail": str(exc)}), 503
+
+    @app.get("/api/research/site")
+    def api_research_site():
+        host = (request.args.get("host") or "").strip().lower()
+        if not host:
+            return jsonify({"error": "missing host"}), 400
+        try:
+            session = db.SessionLocal()
+            try:
+                hist = collect_site_history(session, host)
+            finally:
+                session.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("site history lookup failed: %s", exc)
+            return jsonify({"error": "lookup unavailable", "detail": str(exc)}), 503
+        if hist is None:
+            return jsonify({"error": "unknown host"}), 404
+        return jsonify(hist)
+
+    @app.get("/research")
+    def research():
+        try:
+            stats = collect_research()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("research render failed: %s", exc)
+            stats = None
+        return _render_research(stats, token_param=request.args.get("token", ""))
+
     return app
 
 
@@ -483,7 +519,272 @@ def _render(stats: dict | None, token_param: str) -> str:
     html = html.replace("__STATS_JSON__", stats_json.replace("</", "<\\/"))
     safe_token = token_param.replace("\\", "\\\\").replace('"', '\\"')
     html = html.replace("__TOKEN_QS__", safe_token)
+    html = html.replace(
+        "__R_TOKEN__",
+        "?token=" + urllib.parse.quote(token_param, safe="") if token_param else "",
+    )
     return html
+
+
+def _render_research(stats: dict | None, token_param: str) -> str:
+    """Server-render the research archive page; JS soft-refreshes every 5 min."""
+    s = stats or {}
+    k = s.get("kpis") or {}
+    surv = s.get("survival") or {}
+    ledger = s.get("ledger") or []
+    flaps = s.get("flap_leaders") or []
+
+    def _ledger_rows() -> str:
+        if not ledger:
+            return '<tr><td colspan="6" class="muted">no epochs yet</td></tr>'
+        out = []
+        for row in ledger:
+            lost = "—" if row["lost"] is None else str(row["lost"])
+            newly = "—" if row["newly_reachable"] is None else str(row["newly_reachable"])
+            out.append(
+                f'<tr><td class="mono">{row["label"]} <span class="muted">({row["status"]})</span></td>'
+                f'<td class="num">{row["ever_reachable"]}</td>'
+                f'<td class="num">{row["ever_crawled"]}</td>'
+                f'<td class="num">{lost}</td>'
+                f'<td class="num">{newly}</td></tr>'
+            )
+        return "".join(out)
+
+    def _flap_rows() -> str:
+        if not flaps:
+            return '<tr><td colspan="3" class="muted">no transitions recorded yet</td></tr>'
+        out = []
+        for f in flaps:
+            pill = (
+                '<span class="pill ok">alive</span>'
+                if f["now"] == "alive"
+                else '<span class="pill bad">dead</span>'
+            )
+            out.append(
+                f'<tr><td class="mono">{f["host"]}</td>'
+                f'<td class="num">{f["transitions"]}</td>'
+                f"<td>{pill}</td></tr>"
+            )
+        return "".join(out)
+
+    def _funnel() -> str:
+        total = k.get("cohort_total") or 0
+        rows = [
+            ("Seeded (Study 1)", total, "#2dd4bf"),
+            ("Discovered via links", k.get("discovered_via_links") or 0, "#f5a623"),
+            ("Ever reachable", k.get("ever_reachable") or 0, "#2dd4bf"),
+            ("Ever crawled", k.get("ever_crawled") or 0, "#2ecc71"),
+        ]
+        mx = max([v for _, v, _ in rows] + [1])
+        out = []
+        for label, v, color in rows:
+            w = max(2, int(v / mx * 100))
+            out.append(
+                f'<div class="frow"><span>{label}</span>'
+                f'<div class="fbar"><i style="width:{w}%;background:{color}"></i></div>'
+                f'<span class="n">{v}</span></div>'
+            )
+        return "".join(out)
+
+    lifetime = k.get("cohort_lifetime_pct")
+    html = _RESEARCH_TEMPLATE
+    html = html.replace("__EPOCH_LABEL__", s.get("epoch_label") or "none")
+    html = html.replace("__EVER_REACH__", str(k.get("ever_reachable", "—")))
+    html = html.replace("__EVER_CRAWL__", str(k.get("ever_crawled", "—")))
+    html = html.replace("__EVER_REACH_E__", str(k.get("ever_reachable_this_epoch", "—")))
+    html = html.replace("__EVER_CRAWL_E__", str(k.get("ever_crawled_this_epoch", "—")))
+    html = html.replace(
+        "__LIFETIME__", f"{lifetime:.2f}%" if lifetime is not None else "—"
+    )
+    html = html.replace("__COHORT_TOTAL__", str(k.get("cohort_total", "—")))
+    html = html.replace("__XLAYER_N__", str(k.get("xlayer_validated", "—")))
+    html = html.replace("__DISC_N__", str(k.get("discovered_via_links", "—")))
+    html = html.replace("__SURV_SVG__", surv.get("svg") or "")
+    html = html.replace("__SURV_R__", str(surv.get("final_reachable", 0)))
+    html = html.replace("__SURV_C__", str(surv.get("final_crawled", 0)))
+    html = html.replace("__SURV_DAYS__", str(surv.get("days", 0)))
+    html = html.replace("__LEDGER_ROWS__", _ledger_rows())
+    html = html.replace("__FUNNEL__", _funnel())
+    html = html.replace("__FLAP_ROWS__", _flap_rows())
+    safe_token = token_param.replace("\\", "\\\\").replace('"', '\\"')
+    html = html.replace("__TOKEN_QS__", safe_token)
+    html = html.replace("__REFRESH_MS__", str(RESEARCH_REFRESH_MS))
+    return html
+
+
+_RESEARCH_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XL-I2P Study 2 — Research Archive</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:14px;background:#0d1424;color:#e6ecf5;max-width:1100px;margin-inline:auto}
+h2{font-size:.72rem;margin:0 0 10px;color:#9fb0c9;text-transform:uppercase;letter-spacing:.09em}
+.topbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.title{font-size:1.35rem;font-weight:700;margin-right:auto}
+.chip{font-size:.78rem;color:#9fb0c9;background:#16203a;padding:6px 14px;border-radius:20px}
+a.chip{color:#2dd4bf;text-decoration:none;border:1px solid #2dd4bf}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px}
+.kpi{background:#16203a;border-radius:12px;padding:14px}
+.kpi .v{font-size:1.7rem;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:.75rem;color:#9fb0c9;margin-top:3px}
+.card{background:#16203a;border-radius:12px;padding:16px;margin-bottom:12px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.stat{display:flex;justify-content:space-between;font-size:.85rem;padding:3px 0}
+.stat b{font-variant-numeric:tabular-nums}
+.mono{font-family:ui-monospace,monospace;font-size:.8rem;word-break:break-all}
+.muted{color:#8a99a8}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+td,th{padding:5px 6px;border-bottom:1px solid #22304f;text-align:left}
+th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.frow{display:grid;grid-template-columns:170px 1fr 80px;gap:10px;align-items:center;font-size:.85rem;margin:7px 0}
+.fbar{height:20px;border-radius:5px;background:#0d1424;overflow:hidden}
+.fbar i{display:block;height:100%;border-radius:5px}
+.frow .n{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+svg.chart{width:100%;height:auto;background:#0d1424;border-radius:8px}
+.legend{display:flex;gap:16px;font-size:.78rem;color:#9fb0c9;margin-top:8px}
+.sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.pill{display:inline-block;font-size:.72rem;font-weight:700;padding:2px 10px;border-radius:12px;border:1px solid}
+.pill.ok{color:#2ecc71;border-color:#2ecc71;background:rgba(46,204,113,.12)}
+.pill.bad{color:#e74c3c;border-color:#e74c3c;background:rgba(231,76,60,.12)}
+.search{display:flex;gap:8px;margin-bottom:10px}
+.search input{flex:1;background:#0d1424;border:1px solid #22304f;border-radius:8px;color:#e6ecf5;padding:10px 12px;font-size:.9rem;font-family:ui-monospace,monospace}
+.btn{background:#2dd4bf;color:#06231f;border:none;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer}
+.timeline{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.dot{width:12px;height:12px;border-radius:50%;flex:none}
+.dot.ok{background:#2ecc71}.dot.no{background:#e74c3c;opacity:.75}.dot.warn{background:#f5a623}
+.statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin:10px 0}
+.statbox{background:#0d1424;border-radius:8px;padding:8px 10px}
+.statbox .v{font-weight:700;font-size:1rem}.statbox .l{font-size:.7rem;color:#9fb0c9}
+.foot{font-size:.75rem;color:#8a99a8;text-align:center;margin-top:2px}
+a.navlink{font-size:.78rem;color:#2dd4bf;background:#16203a;padding:6px 14px;border-radius:20px;text-decoration:none;border:1px solid #2dd4bf}
+@media (max-width:700px){.kpis{grid-template-columns:repeat(2,1fr)}.cols{grid-template-columns:1fr}.frow{grid-template-columns:120px 1fr 60px}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="title">Research Archive</div>
+  <span class="chip">epoch <b class="mono" id="r-epoch">__EPOCH_LABEL__</b></span>
+  <a class="chip" id="r-back" href="/">&larr; Mission Control</a>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="v" id="r-ever-reach">__EVER_REACH__</div><div class="l">ever reachable (all time &middot; <span id="r-ever-reach-e">__EVER_REACH_E__</span> this epoch)</div></div>
+  <div class="kpi"><div class="v" id="r-ever-crawl">__EVER_CRAWL__</div><div class="l">ever crawled (all time &middot; <span id="r-ever-crawl-e">__EVER_CRAWL_E__</span> this epoch)</div></div>
+  <div class="kpi"><div class="v" id="r-lifetime">__LIFETIME__</div><div class="l">cohort lifetime reach &middot; <span id="r-total">__COHORT_TOTAL__</span> sites</div></div>
+  <div class="kpi"><div class="v" id="r-xlayer">__XLAYER_N__</div><div class="l">sites with validated router association</div></div>
+  <div class="kpi"><div class="v" id="r-disc">__DISC_N__</div><div class="l">sites discovered via links</div></div>
+</div>
+
+<div class="card">
+  <h2>Survival &mdash; cumulative distinct sites ever seen alive, by day</h2>
+  <div id="r-svg">__SURV_SVG__</div>
+  <div class="legend"><span><span class="sw" style="background:#2dd4bf"></span>ever reachable (<span id="r-sr">__SURV_R__</span>)</span><span><span class="sw" style="background:#2ecc71"></span>ever crawled (<span id="r-sc">__SURV_C__</span>)</span><span class="muted">day 0 = epoch start &middot; <span id="r-days">__SURV_DAYS__</span> days</span></div>
+</div>
+
+<div class="card">
+  <h2>Per-epoch ledger</h2>
+  <table><thead><tr><th>Epoch</th><th class="num">Ever reachable</th><th class="num">Ever crawled</th><th class="num">Lost</th><th class="num">Newly reachable</th></tr></thead>
+  <tbody id="r-ledger">__LEDGER_ROWS__</tbody></table>
+  <div class="foot">lost / newly-reachable are computed from the immutable attempts table at rollover &mdash; never from live states.</div>
+</div>
+
+<div class="cols">
+  <div class="card">
+    <h2>Discovery funnel</h2>
+    <div id="r-funnel">__FUNNEL__</div>
+  </div>
+  <div class="card">
+    <h2>Flap leaders &mdash; most alive&harr;dead transitions</h2>
+    <table><thead><tr><th>Host</th><th class="num">Transitions</th><th>Now</th></tr></thead>
+    <tbody id="r-flaps">__FLAP_ROWS__</tbody></table>
+    <div class="foot">High flappers are the interesting cases: intermittent hosting, not stable death.</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Site timeline lookup</h2>
+  <div class="search"><input id="r-host" placeholder="paste a .i2p host, e.g. identiguy.i2p"><button class="btn" id="r-go">Trace</button></div>
+  <div id="r-result"><p class="muted">Every probe, every outcome, its pages and its router association &mdash; no SQL needed.</p></div>
+</div>
+
+<div class="foot" id="r-updated"></div>
+
+<script>
+const TOKEN_QS = "__TOKEN_QS__";
+const REFRESH_MS = __REFRESH_MS__;
+function qs(){ return TOKEN_QS ? "?token=" + encodeURIComponent(TOKEN_QS) : ""; }
+(function(){ const b = document.getElementById("r-back"); if (b) b.href = "/" + qs(); })();
+function set(id, v){ const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.textContent = v; }
+async function refresh(){
+  try {
+    const r = await fetch("/api/research" + qs());
+    if (!r.ok) return;
+    const s = await r.json(), k = s.kpis || {}, sv = s.survival || {};
+    set("r-epoch", s.epoch_label || "none");
+    set("r-ever-reach", k.ever_reachable); set("r-ever-reach-e", k.ever_reachable_this_epoch);
+    set("r-ever-crawl", k.ever_crawled); set("r-ever-crawl-e", k.ever_crawled_this_epoch);
+    set("r-lifetime", k.cohort_lifetime_pct == null ? "—" : k.cohort_lifetime_pct.toFixed(2) + "%");
+    set("r-total", k.cohort_total); set("r-xlayer", k.xlayer_validated); set("r-disc", k.discovered_via_links);
+    const svg = document.getElementById("r-svg"); if (svg && sv.svg) svg.innerHTML = sv.svg;
+    set("r-sr", sv.final_reachable); set("r-sc", sv.final_crawled); set("r-days", sv.days);
+    const up = document.getElementById("r-updated");
+    if (up && s.generated_at) up.textContent = "updated " + new Date(s.generated_at + "Z").toLocaleTimeString();
+  } catch (e) { /* keep last good values */ }
+}
+setInterval(refresh, REFRESH_MS);
+document.getElementById("r-go").addEventListener("click", trace);
+document.getElementById("r-host").addEventListener("keydown", e => { if (e.key === "Enter") trace(); });
+async function trace(){
+  const host = document.getElementById("r-host").value.trim().toLowerCase();
+  const box = document.getElementById("r-result");
+  if (!host){ box.innerHTML = '<p class="muted">enter a host first.</p>'; return; }
+  box.innerHTML = '<p class="muted">tracing…</p>';
+  try {
+    const r = await fetch("/api/research/site" + qs() + (qs() ? "&" : "?") + "host=" + encodeURIComponent(host));
+    if (r.status === 404){ box.innerHTML = '<p class="muted">unknown host — not in the cohort.</p>'; return; }
+    if (!r.ok){ box.innerHTML = '<p class="muted">lookup failed.</p>'; return; }
+    box.innerHTML = renderSite(await r.json());
+  } catch (e){ box.innerHTML = '<p class="muted">lookup failed.</p>'; }
+}
+function dotCls(a){
+  if (a.status === "SUCCESS") return "ok";
+  if (a.status === "FAILED") return "no";
+  return "warn";
+}
+function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function renderSite(h){
+  const atts = (h.attempts || []).slice().reverse();
+  const dots = atts.slice(0, 160).map(a =>
+    `<span class="dot ${dotCls(a)}" title="${esc(a.at)} ${esc(a.type)} ${esc(a.status)}${a.error_type ? " · " + esc(a.error_type) : ""}"></span>`
+  ).join("");
+  const rows = (h.attempts || []).slice(0, 12).map(a =>
+    `<tr><td class="mono">${esc((a.at || "").replace("T", " ").slice(0, 16))}</td><td>${esc(a.type)}</td><td>${esc(a.status)}</td><td class="mono">${esc(a.error_type || "—")}</td></tr>`
+  ).join("");
+  const xl = (h.cross_layer || []).map(o =>
+    `<tr><td class="mono">${esc((o.at || "").replace("T", " ").slice(0, 16))}</td><td class="mono">${esc(o.method || "")}</td><td>${o.leaseset_found ? "validated" : "not found"}</td><td class="mono">${esc((o.canonical_b32 || "").slice(0, 12))}…</td></tr>`
+  ).join("");
+  return `<h2 class="mono" style="color:#e6ecf5;font-size:1rem">${esc(h.host)} <span class="muted">(${esc(h.state)})</span></h2>
+  <div class="timeline">${dots || '<span class="muted">no attempts recorded</span>'}</div>
+  <div class="legend"><span><span class="sw" style="background:#2ecc71"></span>success</span><span><span class="sw" style="background:#e74c3c"></span>failed</span><span><span class="sw" style="background:#f5a623"></span>other</span><span class="muted">oldest → newest · hover a dot for detail${atts.length > 160 ? " · showing latest 160" : ""}</span></div>
+  <div class="statgrid">
+    <div class="statbox"><div class="v">${h.attempts.length}</div><div class="l">probes shown</div></div>
+    <div class="statbox"><div class="v">${h.success_count}</div><div class="l">site successes</div></div>
+    <div class="statbox"><div class="v">${h.failure_count}</div><div class="l">site failures</div></div>
+    <div class="statbox"><div class="v">${h.pages_fetched}</div><div class="l">pages fetched</div></div>
+    <div class="statbox"><div class="v">${h.links_found}</div><div class="l">links out</div></div>
+    <div class="statbox"><div class="v">${esc(h.discovery_method || "seed")}</div><div class="l">discovered via</div></div>
+  </div>
+  <h2>Recent attempts</h2><table><thead><tr><th>At</th><th>Type</th><th>Status</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table>
+  <h2 style="margin-top:10px">Cross-layer identity</h2>${xl ? `<table><thead><tr><th>At</th><th>Method</th><th>LeaseSet</th><th>Canonical b32</th></tr></thead><tbody>${xl}</tbody></table>` : '<p class="muted">no cross-layer observations</p>'}`;
+}
+</script>
+</body>
+</html>
+"""
 
 
 def _pct(rate: float | None) -> str:
@@ -542,6 +843,7 @@ th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;lette
   <span class="pill __LIVE_CLASS__" id="live-pill"><span class="dot"></span><b id="live-status">__LIVE_STATUS__</b></span>
   <span class="chip">epoch <b class="mono" id="epoch-label">__EPOCH_LABEL__</b> &middot; <span id="epoch-age">__AGE_DAYS__ days</span> old &middot; rollover in <span id="epoch-roll">__ROLLOVER_DAYS__</span>d</span>
   <span class="chip">last beat <span id="live-seen">__LIVE_SEEN__</span></span>
+  <a class="navlink" href="/research__R_TOKEN__">Research archive &rarr;</a>
 </div>
 
 <div class="kpis">
@@ -637,6 +939,358 @@ setInterval(refresh, 60000);
 </body>
 </html>
 """
+
+
+# ---------------------------------------------------------------------------
+# Research archive (/research): cumulative, history-oriented stats.
+#
+# The ops page (/) answers "is the crawler alive right now". This page
+# answers "what has the study ever observed". It reads the same database
+# (SELECT only) and is additive: nothing on / changes.
+# ---------------------------------------------------------------------------
+
+RESEARCH_FLAP_LIMIT = 10
+RESEARCH_SITE_ATTEMPT_LIMIT = 200
+RESEARCH_REFRESH_MS = 300_000  # 5 minutes; history moves slowly
+
+
+def _ever_distinct(session, attempt_type: str, epoch_id: int | None) -> int:
+    q = select(func.count(func.distinct(CrawlAttempt.site_id))).where(
+        CrawlAttempt.attempt_type == attempt_type,
+        CrawlAttempt.status == AttemptStatus.SUCCESS.value,
+    )
+    if epoch_id is not None:
+        q = q.where(CrawlAttempt.epoch_id == epoch_id)
+    return session.scalar(q) or 0
+
+
+def _first_success_dates(session, attempt_type: str) -> list:
+    rows = session.execute(
+        select(func.min(CrawlAttempt.started_at))
+        .where(
+            CrawlAttempt.attempt_type == attempt_type,
+            CrawlAttempt.status == AttemptStatus.SUCCESS.value,
+        )
+        .group_by(CrawlAttempt.site_id)
+    ).all()
+    return [r[0] for r in rows if r[0] is not None]
+
+
+def _survival_series(dates: list, day0, days: int) -> list[int]:
+    per_day = [0] * (days + 1)
+    for d in dates:
+        idx = (d - day0).days
+        if 0 <= idx <= days:
+            per_day[idx] += 1
+    cum, out = 0, []
+    for n in per_day:
+        cum += n
+        out.append(cum)
+    return out
+
+
+def _survival_svg(series: list[tuple], days: int) -> str:
+    """Render cumulative survival curves as inline SVG. No JS chart lib needed."""
+    W, H, PL, PB, PT = 600, 220, 46, 26, 12
+    mx = max([v for _, s, _ in series for v in s] + [1])
+
+    def x(i: int) -> float:
+        return PL + (i / max(days, 1)) * (W - PL - 10)
+
+    def y(v: int) -> float:
+        return (H - PB) - (v / mx) * (H - PB - PT)
+
+    grid = "".join(
+        f'<line x1="{PL}" y1="{y(g):.1f}" x2="{W - 10}" y2="{y(g):.1f}" '
+        f'stroke="#22304f" stroke-width="1"'
+        + (' stroke-dasharray="4 4" opacity=".6"' if g else "")
+        + f'/><text x="8" y="{y(g) + 4:.1f}" fill="#8a99a8" font-size="10" '
+        f'font-family="monospace">{g}</text>'
+        for g in (0, mx // 2, mx)
+    )
+    lines = []
+    for _label, vals, color in series:
+        pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
+        lines.append(
+            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2.5"/>'
+        )
+        if vals:
+            lines.append(
+                f'<circle cx="{x(len(vals) - 1):.1f}" cy="{y(vals[-1]):.1f}" '
+                f'r="4" fill="{color}"/>'
+            )
+    xlabels = (
+        f'<text x="{PL}" y="{H - 8}" fill="#8a99a8" font-size="10" '
+        f'font-family="monospace">day 0</text>'
+        f'<text x="{W - 60}" y="{H - 8}" fill="#8a99a8" font-size="10" '
+        f'font-family="monospace">day {days}</text>'
+    )
+    return (
+        f'<svg class="chart" viewBox="0 0 {W} {H}" role="img">'
+        f"{grid}{''.join(lines)}{xlabels}</svg>"
+    )
+
+
+def _flap_leaders(session, limit: int = RESEARCH_FLAP_LIMIT) -> list[dict]:
+    """Sites with the most alive<->dead transitions, via a LAG window query."""
+    rows = session.execute(
+        text(
+            """
+            SELECT s.host AS host, SUM(t.changed) AS transitions, COUNT(*) AS n
+            FROM (
+                SELECT site_id,
+                       CASE
+                         WHEN status <> LAG(status) OVER (
+                                PARTITION BY site_id ORDER BY started_at, id)
+                         THEN 1 ELSE 0
+                       END AS changed
+                FROM crawl_attempts
+                WHERE attempt_type IN ('VERIFY', 'CRAWL')
+                  AND status IN ('SUCCESS', 'FAILED')
+            ) t
+            JOIN sites s ON s.id = t.site_id
+            GROUP BY s.host
+            HAVING transitions > 0
+            ORDER BY transitions DESC, n DESC
+            LIMIT :limit
+            """
+        ),
+        {"limit": limit},
+    ).all()
+    leaders = []
+    for host, transitions, _n in rows:
+        last = session.execute(
+            select(CrawlAttempt.status)
+            .where(
+                CrawlAttempt.site_id == select(Site.id).where(Site.host == host).scalar_subquery(),
+                CrawlAttempt.attempt_type.in_(
+                    (AttemptType.VERIFY.value, AttemptType.CRAWL.value)
+                ),
+                CrawlAttempt.status.in_(
+                    (AttemptStatus.SUCCESS.value, AttemptStatus.FAILED.value)
+                ),
+            )
+            .order_by(CrawlAttempt.started_at.desc(), CrawlAttempt.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        leaders.append(
+            {
+                "host": host,
+                "transitions": int(transitions or 0),
+                "now": "alive" if last == AttemptStatus.SUCCESS.value else "dead",
+            }
+        )
+    return leaders
+
+
+def _epoch_ledger(session) -> list[dict]:
+    """Per-epoch ever-counts plus lost/newly-reachable vs the previous epoch."""
+    epochs = (
+        session.execute(select(Epoch).order_by(Epoch.started_at.asc())).scalars().all()
+    )
+    good = (AttemptType.VERIFY.value, AttemptType.CRAWL.value)
+    prev_ok: set | None = None
+    rows = []
+    for ep in epochs:
+        cur_ok = set(
+            session.execute(
+                select(CrawlAttempt.site_id)
+                .where(
+                    CrawlAttempt.epoch_id == ep.id,
+                    CrawlAttempt.status == AttemptStatus.SUCCESS.value,
+                    CrawlAttempt.attempt_type.in_(good),
+                )
+                .distinct()
+            ).scalars()
+        )
+        cur_attempted = set(
+            session.execute(
+                select(CrawlAttempt.site_id)
+                .where(CrawlAttempt.epoch_id == ep.id)
+                .distinct()
+            ).scalars()
+        )
+        if prev_ok is None:
+            lost, newly = None, None
+        else:
+            newly = len(cur_ok - prev_ok)
+            lost = len((prev_ok - cur_ok) & cur_attempted)
+        rows.append(
+            {
+                "label": ep.label,
+                "status": ep.status,
+                "ever_reachable": _ever_distinct(session, AttemptType.VERIFY.value, ep.id),
+                "ever_crawled": _ever_distinct(session, AttemptType.CRAWL.value, ep.id),
+                "lost": lost,
+                "newly_reachable": newly,
+            }
+        )
+        prev_ok = cur_ok
+    return rows
+
+
+def _collect_research(session) -> dict:
+    now = _utcnow()
+    epoch = session.execute(
+        select(Epoch).where(Epoch.status == EpochStatus.OPEN.value)
+    ).scalar_one_or_none()
+    epoch_id = epoch.id if epoch else None
+
+    cohort_total = session.scalar(select(func.count()).select_from(Site)) or 0
+    ever_reachable = _ever_distinct(session, AttemptType.VERIFY.value, None)
+    ever_crawled = _ever_distinct(session, AttemptType.CRAWL.value, None)
+    xlayer_validated = (
+        session.scalar(
+            select(func.count(func.distinct(CrossLayerObservation.site_id))).where(
+                CrossLayerObservation.leaseset_found.is_(True),
+                CrossLayerObservation.site_id.is_not(None),
+            )
+        )
+        or 0
+    )
+    discovered_via_links = (
+        session.scalar(
+            select(func.count())
+            .select_from(Site)
+            .where(Site.source == "crawl_discovery")
+        )
+        or 0
+    )
+
+    # Survival curves: day 0 = epoch start if known, else first success.
+    reach_dates = _first_success_dates(session, AttemptType.VERIFY.value)
+    crawl_dates = _first_success_dates(session, AttemptType.CRAWL.value)
+    all_dates = reach_dates + crawl_dates
+    if epoch and epoch.started_at:
+        day0 = epoch.started_at
+    elif all_dates:
+        day0 = min(all_dates)
+    else:
+        day0 = now
+    days = max(0, (now - day0).days)
+    reach_series = _survival_series(reach_dates, day0, days)
+    crawl_series = _survival_series(crawl_dates, day0, days)
+
+    return {
+        "generated_at": now.isoformat(),
+        "epoch_label": epoch.label if epoch else None,
+        "kpis": {
+            "ever_reachable": ever_reachable,
+            "ever_crawled": ever_crawled,
+            "ever_reachable_this_epoch": _ever_distinct(
+                session, AttemptType.VERIFY.value, epoch_id
+            ),
+            "ever_crawled_this_epoch": _ever_distinct(
+                session, AttemptType.CRAWL.value, epoch_id
+            ),
+            "cohort_lifetime_pct": round(ever_reachable / cohort_total * 100, 2)
+            if cohort_total
+            else None,
+            "cohort_total": cohort_total,
+            "xlayer_validated": xlayer_validated,
+            "discovered_via_links": discovered_via_links,
+        },
+        "survival": {
+            "days": days,
+            "svg": _survival_svg(
+                [
+                    ("ever reachable", reach_series, "#2dd4bf"),
+                    ("ever crawled", crawl_series, "#2ecc71"),
+                ],
+                days,
+            ),
+            "final_reachable": reach_series[-1] if reach_series else 0,
+            "final_crawled": crawl_series[-1] if crawl_series else 0,
+        },
+        "ledger": _epoch_ledger(session),
+        "flap_leaders": _flap_leaders(session),
+    }
+
+
+def collect_research() -> dict:
+    """Gather research-archive numbers with cheap, indexed SELECTs only."""
+    session = db.SessionLocal()
+    try:
+        return _collect_research(session)
+    finally:
+        session.close()
+
+
+def collect_site_history(session, host: str) -> dict | None:
+    """Full per-site history for the research lookup box."""
+    site = session.execute(select(Site).where(Site.host == host)).scalar_one_or_none()
+    if site is None:
+        return None
+    attempts = (
+        session.execute(
+            select(CrawlAttempt)
+            .where(CrawlAttempt.site_id == site.id)
+            .order_by(CrawlAttempt.started_at.desc(), CrawlAttempt.id.desc())
+            .limit(RESEARCH_SITE_ATTEMPT_LIMIT)
+        )
+        .scalars()
+        .all()
+    )
+    pages = (
+        session.scalar(
+            select(func.count()).select_from(Page).where(Page.site_id == site.id)
+        )
+        or 0
+    )
+    links = (
+        session.scalar(
+            select(func.count()).select_from(Link).where(Link.source_site_id == site.id)
+        )
+        or 0
+    )
+    xlayer = (
+        session.execute(
+            select(CrossLayerObservation)
+            .where(CrossLayerObservation.site_id == site.id)
+            .order_by(CrossLayerObservation.observed_at.desc())
+            .limit(20)
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "host": site.host,
+        "state": site.state,
+        "first_seen_at": site.first_seen_at.isoformat() if site.first_seen_at else None,
+        "last_checked_at": site.last_checked_at.isoformat()
+        if site.last_checked_at
+        else None,
+        "last_crawled_at": site.last_crawled_at.isoformat()
+        if site.last_crawled_at
+        else None,
+        "success_count": site.success_count,
+        "failure_count": site.failure_count,
+        "discovery_method": site.discovery_method,
+        "is_cross_layer": site.is_cross_layer,
+        "pages_fetched": pages,
+        "links_found": links,
+        "attempts": [
+            {
+                "at": a.started_at.isoformat() if a.started_at else None,
+                "type": a.attempt_type,
+                "status": a.status,
+                "error_type": a.error_type,
+                "pages": a.pages_fetched,
+                "links": a.links_found,
+            }
+            for a in attempts
+        ],
+        "cross_layer": [
+            {
+                "at": o.observed_at.isoformat() if o.observed_at else None,
+                "method": o.lookup_method,
+                "leaseset_found": o.leaseset_found,
+                "canonical_b32": o.canonical_b32,
+                "routing_key": o.routing_key,
+            }
+            for o in xlayer
+        ],
+    }
 
 
 def main() -> None:
