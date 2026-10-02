@@ -21,7 +21,7 @@ VM1 only.
 
 ```
 xl_i2p/            # Tier 1: crawler + read-only dashboard (xl_i2p/dashboard.py)
-tests/             # 52 tests, no real network (httpx mocked, SQLite)
+tests/             # 62 tests, no real network (httpx mocked, SQLite)
 systemd/           # crawler, dashboard, and epoch-rollover units
 schema.sql         # MariaDB schema (9 tables + 2 views)
 .env.example       # copy to .env — every setting documented, sane defaults
@@ -194,19 +194,21 @@ verify `manifest.json` SHA-256 hashes before analysis.
 
 ## Dashboard (read-only, runs on VM2)
 
-A mobile-friendly, single-page monitor for checking the campaign on the go.
+A dark "Mission Control" ops console for watching the campaign live.
 It runs next to MariaDB on VM2, reads the live database **read-only**
 (SELECTs only, never writes), and shows:
 
-- **Crawler**: liveness from the `heartbeats` table (ALIVE/STALE/DEAD),
-  open epoch label, epoch age, days until auto-rollover.
-- **Cohort**: site counts by state.
-- **This epoch**: verify/crawl attempts + success rates, pages fetched,
-  links found, new sites discovered, top-5 error taxonomy.
-- **Cross-layer**: epoch-loop LeaseSet observations, `local_netdb` and
-  `vps_floodfill_netdb` network observations (this epoch + cumulative).
+- **Status bar**: crawler liveness (ALIVE/STALE/DEAD, pulsing pill), open
+  epoch label, epoch age, days until auto-rollover, last heartbeat.
+- **KPI cards**: verify/crawl attempts + success rates, pages fetched,
+  links found.
+- **Cohort grid**: site counts across all 10 states.
+- **Error taxonomy bars** and **cross-layer panel**: top errors, epoch-loop
+  LeaseSet observations, `local_netdb` and `vps_floodfill_netdb` network
+  observations (this epoch + cumulative).
 - **Churn**: newly reachable vs lost sites, from epoch 2 onward.
 - **Health**: recent heartbeats and currently-stuck VERIFYING/CRAWLING sites.
+- A nav link to the **Research archive** (see below).
 
 Numbers auto-refresh every 60s; no external assets (renders over a slow link).
 `/api/stats` returns the same numbers as JSON for programmatic checks;
