@@ -18,7 +18,7 @@ from .janitor import run_janitor
 from .logging_setup import setup_logging
 from .proxy import fetch_test_eepsite, tcp_proxy_available, wait_for_proxy
 from .scheduler import run_loop, run_once
-from .seeds import import_cross_layer_file, import_seed_file
+from .seeds import admit_leaseset_discoveries, import_cross_layer_file, import_seed_file
 from .stats import collect_stats
 from .verifier import verify_batch
 
@@ -346,6 +346,19 @@ def run(
     else:
         asyncio.run(run_loop(epoch.label, epoch.id, verify_limit=verify_limit,
                              crawl_limit=crawl_limit, sleep_seconds=sleep_seconds))
+
+
+@app.command("admit-leasesets")
+def admit_leasesets(
+    limit: int = typer.Option(500, help="Maximum new hosts to admit from the lease-set harvest."),
+    epoch_label: str = typer.Option("", help="Epoch to tag discoveries with (default: open epoch)."),
+) -> None:
+    """Admit new .b32.i2p destinations seen in the VPS floodfill lease-set harvest."""
+    setup_logging()
+    with session_scope() as session:
+        epoch = _resolve_epoch(session, epoch_label, resume=not epoch_label)
+        result = admit_leaseset_discoveries(session, epoch.id, limit=limit)
+    console.print(result)
 
 
 @app.command("stats")

@@ -13,14 +13,44 @@ import httpx
 from .states import ErrorType
 
 
-def classify_http_status(status_code: int | None) -> tuple[str | None, str | None]:
-    """Return (error_type, message) for an HTTP response; (None, None) if OK-ish."""
+# Marker emitted by the I2P HTTP proxy (i2ptunnel) on its generated error
+# pages, e.g. "503 Service Unavailable" with "<H1>I2P ERROR: DESTINATION NOT
+# FOUND</H1>" when the requested .i2p destination has no published lease set
+# or cannot be reached through tunnels. Verified against the
+# I2PTunnelHTTPClientBase source (ERR_DESTINATION_UNKNOWN fallback page).
+# An origin eepsite's own 5xx page will not carry this marker, which is what
+# lets us separate proxy-reported destination failure from server failure.
+_I2P_PROXY_ERROR_MARKER = b"i2p error:"
+_PROXY_BODY_SCAN_LIMIT = 8192
+
+
+def _looks_like_i2p_proxy_error(body: bytes | None) -> bool:
+    if not body:
+        return False
+    return _I2P_PROXY_ERROR_MARKER in bytes(body[:_PROXY_BODY_SCAN_LIMIT]).lower()
+
+
+def classify_http_status(
+    status_code: int | None, body: bytes | None = None
+) -> tuple[str | None, str | None]:
+    """Return (error_type, message) for an HTTP response; (None, None) if OK-ish.
+
+    ``body`` is the (bounded) response body; when a 5xx carries the I2P
+    proxy's error marker it is classified as I2P_DEST_NOT_FOUND (the proxy
+    reporting an unreachable destination) rather than HTTP_5XX (the origin
+    server itself failing).
+    """
     if status_code is None:
         return ErrorType.UNKNOWN_ERROR.value, "no HTTP status received"
     if status_code < 400:
         return None, None
     if 400 <= status_code < 500:
         return ErrorType.HTTP_4XX.value, f"HTTP {status_code}"
+    if _looks_like_i2p_proxy_error(body):
+        return (
+            ErrorType.I2P_DEST_NOT_FOUND.value,
+            f"HTTP {status_code} (I2P proxy: destination not found)",
+        )
     return ErrorType.HTTP_5XX.value, f"HTTP {status_code}"
 
 
@@ -67,8 +97,12 @@ def classify_exception(exc: BaseException) -> tuple[str, str]:
     return ErrorType.UNKNOWN_ERROR.value, _message(exc)
 
 
-def classify_fetch_error(error: BaseException | None, status_code: int | None) -> tuple[str | None, str | None]:
+def classify_fetch_error(
+    error: BaseException | None,
+    status_code: int | None,
+    body: bytes | None = None,
+) -> tuple[str | None, str | None]:
     """Combined classifier for a fetch outcome: exception wins, else HTTP status."""
     if error is not None:
         return classify_exception(error)
-    return classify_http_status(status_code)
+    return classify_http_status(status_code, body)

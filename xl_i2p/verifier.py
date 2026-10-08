@@ -91,7 +91,7 @@ async def verify_url(
     try:
         response = await client.get(base_url, headers={"User-Agent": settings.user_agent})
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        error_type, error_message = classify_http_status(response.status_code)
+        error_type, error_message = classify_http_status(response.status_code, response.content)
         if error_type is None:
             return True, response.status_code, None, None, elapsed_ms
         return False, response.status_code, error_type, error_message, elapsed_ms

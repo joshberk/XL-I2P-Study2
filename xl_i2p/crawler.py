@@ -98,7 +98,7 @@ async def fetch(client: httpx.AsyncClient, url: str) -> FetchResult:
         if len(content) > settings.max_content_bytes:
             return FetchResult(url, response.status_code, content_type, None, elapsed_ms,
                                ErrorType.CONTENT_TOO_LARGE.value, "content exceeded limit")
-        error_type, error_message = classify_http_status(response.status_code)
+        error_type, error_message = classify_http_status(response.status_code, content)
         return FetchResult(url, response.status_code, content_type, content, elapsed_ms,
                            error_type, error_message)
     except Exception as exc:

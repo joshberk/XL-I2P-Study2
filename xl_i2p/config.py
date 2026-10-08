@@ -92,6 +92,14 @@ class Settings:
     # router's own netDb store (client-sampled view, not the full DHT).
     netdb_census_enabled: bool = _bool("NETDB_CENSUS_ENABLED", True)
     netdb_census_interval_seconds: int = _int("NETDB_CENSUS_INTERVAL_SECONDS", 86400)
+    # Lease-set discovery feed: admit previously unseen .b32.i2p destinations
+    # published in the VPS floodfill sensor's lease-set harvest as new
+    # DISCOVERED sites (bounded per run; the verify pass then determines
+    # which are actually web services). Closes the link-only discovery blind
+    # spot: most eepsites are isolated and never appear in outlinks.
+    leaseset_discovery_enabled: bool = _bool("LEASESET_DISCOVERY_ENABLED", True)
+    leaseset_discovery_interval_seconds: int = _int("LEASESET_DISCOVERY_INTERVAL_SECONDS", 3600)
+    leaseset_discovery_per_run: int = _int("LEASESET_DISCOVERY_PER_RUN", 500)
     # Explicit path to the vantage router's netDb store. Needed when the
     # router runs as a different OS user than the crawler (e.g. router as
     # "administrator" -> /home/administrator/.i2p/netDb, crawler as xl-i2p).

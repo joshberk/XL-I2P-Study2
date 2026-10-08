@@ -39,3 +39,33 @@ def test_tls_and_unknown():
     etype, msg = classify_exception(RuntimeError("weird"))
     assert etype == ErrorType.UNKNOWN_ERROR.value
     assert "RuntimeError" in msg
+
+
+I2P_PROXY_503_BODY = (
+    b"<html><body><H1>I2P ERROR: DESTINATION NOT FOUND</H1>"
+    b"That I2P Destination was not found. Perhaps you pasted in the "
+    b"wrong BASE64 I2P Destination.</body></html>"
+)
+
+
+def test_i2p_proxy_destination_not_found_split():
+    # 503 carrying the I2P proxy's error marker -> proxy-reported
+    # destination failure, not an origin server 5xx.
+    etype, msg = classify_http_status(503, I2P_PROXY_503_BODY)
+    assert etype == ErrorType.I2P_DEST_NOT_FOUND.value
+    assert "503" in msg
+    # Marker match is case-insensitive.
+    etype, _ = classify_http_status(500, b"<h1>i2p error: timeout</h1>")
+    assert etype == ErrorType.I2P_DEST_NOT_FOUND.value
+    # A plain 5xx with no proxy marker stays HTTP_5XX (origin server failed).
+    etype, _ = classify_http_status(503, b"<html><body>Backend exploded</body></html>")
+    assert etype == ErrorType.HTTP_5XX.value
+    etype, _ = classify_http_status(500, None)
+    assert etype == ErrorType.HTTP_5XX.value
+    etype, _ = classify_http_status(500, b"")
+    assert etype == ErrorType.HTTP_5XX.value
+    # 4xx is unaffected even if the body mentions I2P errors.
+    etype, _ = classify_http_status(404, I2P_PROXY_503_BODY)
+    assert etype == ErrorType.HTTP_4XX.value
+    # 2xx never classifies, regardless of body.
+    assert classify_http_status(200, I2P_PROXY_503_BODY) == (None, None)

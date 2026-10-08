@@ -219,3 +219,82 @@ def test_no_open_epoch(db_session):
     assert data["epoch"]["label"] is None
     html = application.test_client().get("/?token=t").get_data(as_text=True)
     assert "none" in html
+
+
+def test_daily_churn_day_over_day(db_session):
+    """Day-granular churn: newly reachable / lost with the attempted-day guard."""
+    s = db_session
+    epoch = Epoch(label="2026-Q4", status=EpochStatus.OPEN.value,
+                  started_at=_now() - timedelta(days=10))
+    s.add(epoch)
+    s.flush()
+    sites = {}
+    for name in ("a", "b", "c"):
+        site = Site(host=f"{name}.i2p", base_url=f"http://{name}.i2p/",
+                    state=SiteState.REACHABLE.value,
+                    first_seen_at=_now() - timedelta(days=10))
+        s.add(site)
+        sites[name] = site
+    s.flush()
+
+    def attempt(name, days_ago, ok):
+        site = sites[name]
+        started = _now() - timedelta(days=days_ago, hours=1)
+        s.add(CrawlAttempt(
+            site_id=site.id, epoch_id=epoch.id,
+            attempt_type=AttemptType.VERIFY.value,
+            status=AttemptStatus.SUCCESS.value if ok else AttemptStatus.FAILED.value,
+            started_at=started, finished_at=started + timedelta(minutes=1),
+            error_type=None if ok else "I2P_DEST_NOT_FOUND"))
+
+    # Day -3: a ok, b failed. Day -2: a ok, b ok, c failed.
+    # Day -1: a failed, b ok (c not attempted -> never "lost").
+    # Day 0: a failed, b failed.
+    attempt("a", 3, True);  attempt("b", 3, False)
+    attempt("a", 2, True);  attempt("b", 2, True); attempt("c", 2, False)
+    attempt("a", 1, False); attempt("b", 1, True)
+    attempt("a", 0, False); attempt("b", 0, False)
+    s.commit()
+
+    application = dash_mod.create_app(token="secret")
+    application.config["TESTING"] = True
+    data = application.test_client().get("/api/stats?token=secret").get_json()
+    dc = {row["day"]: row for row in data["daily_churn"]}
+
+    def day(days_ago):
+        return (_now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+    d3, d2, d1, d0 = dc[day(3)], dc[day(2)], dc[day(1)], dc[day(0)]
+    assert (d3["attempted"], d3["reachable"]) == (2, 1)
+    assert d3["newly_reachable"] == 1 and d3["lost"] == 0
+    assert (d2["attempted"], d2["reachable"]) == (3, 2)
+    assert d2["newly_reachable"] == 1 and d2["lost"] == 0  # b newly reachable
+    assert (d1["attempted"], d1["reachable"]) == (2, 1)
+    assert d1["newly_reachable"] == 0 and d1["lost"] == 1  # a lost (attempted)
+    # c was ok nowhere; never attempted after day -2 -> never counted lost
+    assert (d0["attempted"], d0["reachable"]) == (2, 0)
+    assert d0["newly_reachable"] == 0 and d0["lost"] == 1  # b lost (attempted)
+
+
+def test_daily_churn_needs_two_days(db_session):
+    s = db_session
+    epoch = Epoch(label="2026-Q4", status=EpochStatus.OPEN.value,
+                  started_at=_now() - timedelta(days=10))
+    s.add(epoch)
+    s.flush()
+    site = Site(host="a.i2p", base_url="http://a.i2p/",
+                state=SiteState.REACHABLE.value,
+                first_seen_at=_now() - timedelta(days=10))
+    s.add(site)
+    s.flush()
+    started = _now() - timedelta(hours=1)
+    s.add(CrawlAttempt(site_id=site.id, epoch_id=epoch.id,
+                       attempt_type=AttemptType.VERIFY.value,
+                       status=AttemptStatus.SUCCESS.value,
+                       started_at=started, finished_at=started))
+    s.commit()
+
+    application = dash_mod.create_app(token="secret")
+    application.config["TESTING"] = True
+    html = application.test_client().get("/?token=secret").data.decode()
+    assert "daily churn needs two days of attempts" in html

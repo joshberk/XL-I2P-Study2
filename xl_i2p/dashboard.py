@@ -22,7 +22,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 
 from . import db
 from .config import settings
@@ -273,6 +273,49 @@ def _collect(session) -> dict:
                 "lost": len((prev_ok - cur_ok) & cur_attempted),
             }
 
+    # --- Daily churn (day-granular; live from day 2 of the first epoch) ----
+    # Epoch churn needs two epochs; this gives a live signal now. A site
+    # counts as "lost" on day D only if it was attempted on day D (the same
+    # attempted-this-period guard as the epoch version), so untested sites
+    # are never misclassified as lost. The attempted set differs day to day:
+    # this is sampled churn, not a census.
+    daily_churn: list[dict] = []
+    _good_types = (AttemptType.VERIFY.value, AttemptType.CRAWL.value)
+    _day_col = func.date(CrawlAttempt.started_at)
+    _ok_col = func.max(
+        case((CrawlAttempt.status == AttemptStatus.SUCCESS.value, 1), else_=0)
+    )
+    _day_rows = session.execute(
+        select(_day_col.label("day"), CrawlAttempt.site_id, _ok_col.label("ok"))
+        .where(
+            CrawlAttempt.attempt_type.in_(_good_types),
+            CrawlAttempt.started_at >= now - timedelta(days=15),
+        )
+        .group_by(_day_col, CrawlAttempt.site_id)
+    ).all()
+    _ok_by_day: dict[str, set[int]] = {}
+    _att_by_day: dict[str, set[int]] = {}
+    for _d, _sid, _is_ok in _day_rows:
+        _key = str(_d)
+        _att_by_day.setdefault(_key, set()).add(_sid)
+        if _is_ok:
+            _ok_by_day.setdefault(_key, set()).add(_sid)
+    _prev_ok: set[int] = set()
+    for _d in sorted(set(_att_by_day) | set(_ok_by_day)):
+        _ok_set = _ok_by_day.get(_d, set())
+        _att_set = _att_by_day.get(_d, set())
+        daily_churn.append(
+            {
+                "day": _d,
+                "attempted": len(_att_set),
+                "reachable": len(_ok_set),
+                "newly_reachable": len(_ok_set - _prev_ok),
+                "lost": len((_prev_ok - _ok_set) & _att_set),
+            }
+        )
+        _prev_ok = _ok_set
+    daily_churn = daily_churn[-14:]
+
     # --- Stuck sites (janitor signal) --------------------------------------
     cutoff = now - timedelta(minutes=settings.stale_minutes)
     stuck_states = (SiteState.VERIFYING.value, SiteState.CRAWLING.value)
@@ -300,6 +343,7 @@ def _collect(session) -> dict:
         "this_epoch": epoch_block,
         "cross_layer": cross_layer,
         "churn": churn,
+        "daily_churn": daily_churn,
         "health": {
             "heartbeats": heartbeats,
             "stuck_sites": {
@@ -476,13 +520,38 @@ def _render(stats: dict | None, token_param: str) -> str:
         _age_str(datetime.fromisoformat(live["last_seen"])) if live.get("last_seen") else "never"
     )
 
-    churn_html = (
+    def _daily_churn_table() -> str:
+        rows = s.get("daily_churn") or []
+        if len(rows) < 2:
+            return '<p class="muted">daily churn needs two days of attempts</p>'
+        out = [
+            '<table><thead><tr><th>day</th><th class="num">attempted</th>'
+            '<th class="num">reachable</th><th class="num">+ new</th>'
+            '<th class="num">&minus; lost</th></tr></thead>'
+            '<tbody id="churn-daily">'
+        ]
+        for r in rows:
+            out.append(
+                f'<tr><td class="mono">{r["day"]}</td>'
+                f'<td class="num">{r["attempted"]}</td>'
+                f'<td class="num">{r["reachable"]}</td>'
+                f'<td class="num">+{r["newly_reachable"]}</td>'
+                f'<td class="num">&minus;{r["lost"]}</td></tr>'
+            )
+        out.append("</tbody></table>")
+        out.append(
+            '<p class="muted">day-over-day, sampled: a site counts as lost '
+            "only if it was attempted that day</p>"
+        )
+        return "".join(out)
+
+    churn_html = _daily_churn_table() + (
         f'<div class="row"><span>Newly reachable vs {churn.get("prev_epoch_label")}</span>'
         f'<b id="churn-new">{churn.get("newly_reachable")}</b></div>'
         f'<div class="row"><span>Lost (attempted, no success yet)</span>'
         f'<b id="churn-lost">{churn.get("lost")}</b></div>'
         if churn.get("available")
-        else '<p class="muted">— (needs a second epoch)</p>'
+        else '<p class="muted">epoch churn needs a second epoch</p>'
     )
 
     stats_json = json.dumps(s)
@@ -923,6 +992,14 @@ function apply(s){
   set("xl-net-cum", xlc.network_observations ?? 0);
   set("stuck-n", st.count ?? 0);
   if (ch.available){ set("churn-new", ch.newly_reachable); set("churn-lost", ch.lost); }
+  const dc = s.daily_churn || [];
+  const ctbody = document.getElementById("churn-daily");
+  if (ctbody && dc.length >= 2) {
+    ctbody.innerHTML = dc.map(r =>
+      `<tr><td class="mono">${r.day}</td><td class="num">${r.attempted}</td>` +
+      `<td class="num">${r.reachable}</td><td class="num">+${r.newly_reachable}</td>` +
+      `<td class="num">&minus;${r.lost}</td></tr>`).join("");
+  }
   const up = document.getElementById("updated");
   if (up && s.generated_at) up.textContent = "updated " + new Date(s.generated_at + "Z").toLocaleTimeString();
 }

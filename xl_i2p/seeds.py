@@ -11,12 +11,19 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from .models import NetworkObservation, SeedEvent, Site, now
 from .states import SiteState
 from .utils import base_url_for_host, extract_i2p_host, site_type_for_host
+
+
+# Network-observation source carrying the VPS floodfill sensor's lease-set
+# harvest (written by vps_harvester/ingest). Lease-set records carry
+# host=<dest>.b32.i2p; routerinfo records have host NULL and are ignored.
+FLOODFILL_SOURCE_TYPE = "vps_floodfill_netdb"
+LEASESET_DISCOVERY_SOURCE = "floodfill_leaseset"
 
 
 def upsert_site(
@@ -189,3 +196,60 @@ def import_cross_layer_file(
         if before is None:
             inserted += 1
     return inserted, seen, observations
+
+
+def admit_leaseset_discoveries(
+    session: Session, epoch_id: int | None, limit: int = 500
+) -> dict[str, int]:
+    """Admit previously unseen .b32.i2p destinations from the VPS floodfill
+    lease-set harvest as new DISCOVERED sites.
+
+    Why this exists: outlink crawling can only discover eepsites that are
+    linked to, but prior I2P measurements find most eepsites are isolated
+    (no incoming/outgoing links). The floodfill sensor's lease-set harvest
+    sees published destinations regardless of linkage, so mining it closes
+    the link-only discovery blind spot. Admitted hosts still go through the
+    normal verify pass, which determines which are actually web services.
+
+    Bounded by ``limit`` (most-recently-observed first) and idempotent:
+    re-running admits nothing new.
+    """
+    site_exists = exists(select(Site.id).where(Site.host == NetworkObservation.host))
+    last_seen = func.max(NetworkObservation.observed_at)
+    stmt = (
+        select(NetworkObservation.host, last_seen.label("last_seen"))
+        .where(
+            NetworkObservation.source_type == FLOODFILL_SOURCE_TYPE,
+            NetworkObservation.host.is_not(None),
+            NetworkObservation.host != "",
+            ~site_exists,
+        )
+        .group_by(NetworkObservation.host)
+        .order_by(last_seen.desc())
+        .limit(limit)
+    )
+    admitted = 0
+    for raw_host, _last_seen in session.execute(stmt):
+        host = extract_i2p_host(raw_host or "")
+        if not host:
+            continue
+        if session.scalar(select(Site.id).where(Site.host == host)) is not None:
+            continue  # normalized duplicate of an existing site
+        upsert_site(
+            session,
+            host,
+            source=LEASESET_DISCOVERY_SOURCE,
+            state_if_new=SiteState.DISCOVERED.value,
+            network_source=FLOODFILL_SOURCE_TYPE,
+            discovery_method=LEASESET_DISCOVERY_SOURCE,
+        )
+        record_seed_event(
+            session,
+            host,
+            LEASESET_DISCOVERY_SOURCE,
+            f"{FLOODFILL_SOURCE_TYPE} leaseset harvest",
+            epoch_id=epoch_id,
+        )
+        admitted += 1
+    session.commit()
+    return {"admitted": admitted, "limit": limit}

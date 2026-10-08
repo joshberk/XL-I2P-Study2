@@ -87,6 +87,14 @@ def _run_census_sync(epoch_id: int) -> dict:
         return census_local_netdb(session, epoch_id)
 
 
+def _run_leaseset_discovery_sync(epoch_id: int, limit: int) -> dict:
+    from .db import SessionLocal
+    from .seeds import admit_leaseset_discoveries
+
+    with SessionLocal() as session:
+        return admit_leaseset_discoveries(session, epoch_id, limit=limit)
+
+
 async def run_loop(
     epoch_label: str,
     epoch_id: int,
@@ -104,6 +112,7 @@ async def run_loop(
         "xlayer_lookups": 0, "xlayer_validated": 0, "netdb_census_recorded": 0,
     }
     last_census_mono: float | None = None
+    last_leaseset_mono: float | None = None
     logger.info("scheduler loop started for epoch '%s'", epoch_label)
 
     while True:
@@ -166,6 +175,27 @@ async def run_loop(
                         logger.info("cycle %d netdb census: %s", counters["cycles"], census_result)
             except Exception:
                 logger.exception("local netDb census failed; continuing")
+                counters["errors"] += 1
+            # Lease-set discovery feed: admit new .b32.i2p destinations from
+            # the VPS floodfill harvest, at most once per interval. Bounded
+            # per run; the verify pass sorts web services from noise.
+            try:
+                if settings.leaseset_discovery_enabled:
+                    now_mono = time.monotonic()
+                    if (last_leaseset_mono is None
+                            or now_mono - last_leaseset_mono >= settings.leaseset_discovery_interval_seconds):
+                        disc_result = await asyncio.to_thread(
+                            _run_leaseset_discovery_sync, epoch_id,
+                            settings.leaseset_discovery_per_run)
+                        last_leaseset_mono = time.monotonic()
+                        counters["leaseset_admitted"] = (
+                            counters.get("leaseset_admitted", 0)
+                            + disc_result.get("admitted", 0)
+                        )
+                        logger.info("cycle %d leaseset discovery: %s",
+                                    counters["cycles"], disc_result)
+            except Exception:
+                logger.exception("lease-set discovery admission failed; continuing")
                 counters["errors"] += 1
         except asyncio.CancelledError:
             logger.info("scheduler loop cancelled")
