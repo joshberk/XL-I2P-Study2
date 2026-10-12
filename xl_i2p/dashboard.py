@@ -760,9 +760,6 @@ svg.chart{width:100%;height:auto;background:#0d1424;border-radius:8px}
 .search{display:flex;gap:8px;margin-bottom:10px}
 .search input{flex:1;background:#0d1424;border:1px solid #22304f;border-radius:8px;color:#e6ecf5;padding:10px 12px;font-size:.9rem;font-family:ui-monospace,monospace}
 .btn{background:#2dd4bf;color:#06231f;border:none;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer}
-.dl-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
-.dl-btn{display:inline-block;font-size:.8rem;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf;border-radius:8px;padding:8px 14px;text-decoration:none}
-.dl-btn:hover{background:rgba(45,212,191,.12)}
 .timeline{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0;align-items:center}
 .dot{width:12px;height:12px;border-radius:50%;flex:none}
 .dot.ok{background:#2ecc71}.dot.no{background:#e74c3c;opacity:.75}.dot.warn{background:#f5a623}
@@ -927,6 +924,9 @@ h2{font-size:.72rem;margin:0 0 10px;color:#9fb0c9;text-transform:uppercase;lette
 .kpi .v{font-size:1.7rem;font-weight:700;font-variant-numeric:tabular-nums}
 .kpi .l{font-size:.75rem;color:#9fb0c9;margin-top:3px}
 .card{background:#16203a;border-radius:12px;padding:16px;margin-bottom:12px}
+.dl-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.dl-btn{display:inline-block;font-size:.8rem;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf;border-radius:8px;padding:8px 14px;text-decoration:none}
+.dl-btn:hover{background:rgba(45,212,191,.12)}
 .cohort-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
 .cell{background:#0d1424;border-radius:8px;padding:10px;text-align:center}
 .cell .k{font-size:.66rem;color:#9fb0c9;display:block}

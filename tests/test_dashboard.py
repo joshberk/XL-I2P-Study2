@@ -382,6 +382,8 @@ def test_dashboard_html_has_all_dataset_buttons(app):
     html = app.test_client().get("/?token=secret").data.decode()
     for name in dash_mod.DATASETS:
         assert f"/api/download/{name}?token=secret" in html, name
+    # the button styles must live in the served page's own <style> block
+    assert ".dl-btn{" in html and ".dl-grid{" in html
 
 
 def test_download_registry_covers_all_tables(app):
