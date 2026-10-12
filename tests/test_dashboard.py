@@ -298,3 +298,96 @@ def test_daily_churn_needs_two_days(db_session):
     application.config["TESTING"] = True
     html = application.test_client().get("/?token=secret").data.decode()
     assert "daily churn needs two days of attempts" in html
+
+
+# ---------------------------------------------------------------------------
+# CSV dataset downloads (/api/download/<name>)
+# ---------------------------------------------------------------------------
+
+def _dl_csv(app, name, token="secret"):
+    return app.test_client().get(f"/api/download/{name}?token={token}")
+
+
+def test_download_unknown_dataset_404(app):
+    r = _dl_csv(app, "nope")
+    assert r.status_code == 404
+
+
+def test_download_requires_auth(app):
+    r = app.test_client().get("/api/download/sites")
+    assert r.status_code == 401
+    r = app.test_client().get("/api/download/sites?token=wrong")
+    assert r.status_code == 401
+
+
+def test_download_sites_csv(app):
+    r = _dl_csv(app, "sites")
+    assert r.status_code == 200
+    assert r.headers["Content-Type"].startswith("text/csv")
+    assert "attachment" in r.headers["Content-Disposition"]
+    assert "xl-i2p-study2-sites-" in r.headers["Content-Disposition"]
+    lines = r.data.decode().strip().splitlines()
+    assert lines[0].startswith("id,host,base_url,")
+    assert len(lines) == 6  # header + 5 seeded sites
+    assert "a.i2p" in r.data.decode()
+
+
+def test_download_crawl_attempts_csv(app):
+    r = _dl_csv(app, "crawl_attempts")
+    assert r.status_code == 200
+    lines = r.data.decode().strip().splitlines()
+    assert lines[0].startswith("id,site_id,epoch_id,attempt_type,")
+    assert len(lines) == 7  # header + 6 seeded attempts
+
+
+def test_download_links_csv(app):
+    r = _dl_csv(app, "links")
+    assert r.status_code == 200
+    lines = r.data.decode().strip().splitlines()
+    assert lines[0].startswith("id,source_site_id,")
+    assert len(lines) == 8  # header + 7 seeded links
+
+
+def test_download_pages_csv(app):
+    r = _dl_csv(app, "pages")
+    assert r.status_code == 200
+    lines = r.data.decode().strip().splitlines()
+    assert lines[0].startswith("id,site_id,epoch_id,url,")
+    assert len(lines) == 4  # header + 3 seeded pages
+
+
+def test_download_daily_churn_csv(app):
+    r = _dl_csv(app, "daily_churn")
+    assert r.status_code == 200
+    lines = r.data.decode().strip().splitlines()
+    assert lines[0] == "day,attempted,reachable,newly_reachable,lost"
+    # seeded attempts are all within the last hour: one day row, 4 sites
+    # attempted (s1..s4). s3 counts as reachable for the day: its epoch-1
+    # verify succeeded the same day (day-granular ok = max over attempts).
+    assert len(lines) == 2
+    day, attempted, reachable, newly_reachable, lost = lines[1].split(",")
+    assert (attempted, reachable, newly_reachable, lost) == ("4", "3", "3", "0")
+
+
+def test_download_epochs_and_network_obs_csv(app):
+    r = _dl_csv(app, "epochs")
+    assert r.status_code == 200
+    assert len(r.data.decode().strip().splitlines()) == 3  # header + 2 epochs
+    r = _dl_csv(app, "network_observations")
+    assert r.status_code == 200
+    assert len(r.data.decode().strip().splitlines()) == 7  # header + 6 obs
+
+
+def test_dashboard_html_has_all_dataset_buttons(app):
+    html = app.test_client().get("/?token=secret").data.decode()
+    for name in dash_mod.DATASETS:
+        assert f"/api/download/{name}?token=secret" in html, name
+
+
+def test_download_registry_covers_all_tables(app):
+    # every table that matters to Study 2 analysis has a button
+    assert set(dash_mod.DATASETS) == {
+        "sites", "crawl_attempts", "pages", "links",
+        "network_observations", "seed_events", "epochs",
+        "cross_layer_observations", "daily_churn",
+    }

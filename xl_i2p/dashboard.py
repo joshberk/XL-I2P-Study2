@@ -15,13 +15,15 @@ Environment:
 """
 from __future__ import annotations
 
+import csv
 import hmac
+import io
 import json
 import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from sqlalchemy import case, func, select, text
 
 from . import db
@@ -34,6 +36,7 @@ from .models import (
     Link,
     NetworkObservation,
     Page,
+    SeedEvent,
     Site,
 )
 from .states import AttemptStatus, AttemptType, EpochStatus, SiteState
@@ -88,6 +91,55 @@ def collect_stats() -> dict:
         return _collect(session)
     finally:
         session.close()
+
+
+def _daily_churn_rows(
+    session, now: datetime, days: int | None = 15
+) -> list[dict]:
+    """Day-granular sampled churn from the immutable crawl attempts.
+
+    A site counts as "lost" on day D only if it was attempted on day D (the
+    same attempted-this-period guard as the epoch version), so untested sites
+    are never misclassified as lost. The attempted set differs day to day:
+    this is sampled churn, not a census. ``days`` windows the lookback for the
+    dashboard view; ``None`` means the full history (CSV export).
+    """
+    good_types = (AttemptType.VERIFY.value, AttemptType.CRAWL.value)
+    day_col = func.date(CrawlAttempt.started_at)
+    ok_col = func.max(
+        case((CrawlAttempt.status == AttemptStatus.SUCCESS.value, 1), else_=0)
+    )
+    stmt = (
+        select(day_col.label("day"), CrawlAttempt.site_id, ok_col.label("ok"))
+        .where(CrawlAttempt.attempt_type.in_(good_types))
+        .group_by(day_col, CrawlAttempt.site_id)
+    )
+    if days is not None:
+        stmt = stmt.where(CrawlAttempt.started_at >= now - timedelta(days=days))
+    day_rows = session.execute(stmt).all()
+    ok_by_day: dict[str, set[int]] = {}
+    att_by_day: dict[str, set[int]] = {}
+    for d, sid, is_ok in day_rows:
+        key = str(d)
+        att_by_day.setdefault(key, set()).add(sid)
+        if is_ok:
+            ok_by_day.setdefault(key, set()).add(sid)
+    out: list[dict] = []
+    prev_ok: set[int] = set()
+    for d in sorted(set(att_by_day) | set(ok_by_day)):
+        ok_set = ok_by_day.get(d, set())
+        att_set = att_by_day.get(d, set())
+        out.append(
+            {
+                "day": d,
+                "attempted": len(att_set),
+                "reachable": len(ok_set),
+                "newly_reachable": len(ok_set - prev_ok),
+                "lost": len((prev_ok - ok_set) & att_set),
+            }
+        )
+        prev_ok = ok_set
+    return out
 
 
 def _collect(session) -> dict:
@@ -274,47 +326,9 @@ def _collect(session) -> dict:
             }
 
     # --- Daily churn (day-granular; live from day 2 of the first epoch) ----
-    # Epoch churn needs two epochs; this gives a live signal now. A site
-    # counts as "lost" on day D only if it was attempted on day D (the same
-    # attempted-this-period guard as the epoch version), so untested sites
-    # are never misclassified as lost. The attempted set differs day to day:
-    # this is sampled churn, not a census.
-    daily_churn: list[dict] = []
-    _good_types = (AttemptType.VERIFY.value, AttemptType.CRAWL.value)
-    _day_col = func.date(CrawlAttempt.started_at)
-    _ok_col = func.max(
-        case((CrawlAttempt.status == AttemptStatus.SUCCESS.value, 1), else_=0)
-    )
-    _day_rows = session.execute(
-        select(_day_col.label("day"), CrawlAttempt.site_id, _ok_col.label("ok"))
-        .where(
-            CrawlAttempt.attempt_type.in_(_good_types),
-            CrawlAttempt.started_at >= now - timedelta(days=15),
-        )
-        .group_by(_day_col, CrawlAttempt.site_id)
-    ).all()
-    _ok_by_day: dict[str, set[int]] = {}
-    _att_by_day: dict[str, set[int]] = {}
-    for _d, _sid, _is_ok in _day_rows:
-        _key = str(_d)
-        _att_by_day.setdefault(_key, set()).add(_sid)
-        if _is_ok:
-            _ok_by_day.setdefault(_key, set()).add(_sid)
-    _prev_ok: set[int] = set()
-    for _d in sorted(set(_att_by_day) | set(_ok_by_day)):
-        _ok_set = _ok_by_day.get(_d, set())
-        _att_set = _att_by_day.get(_d, set())
-        daily_churn.append(
-            {
-                "day": _d,
-                "attempted": len(_att_set),
-                "reachable": len(_ok_set),
-                "newly_reachable": len(_ok_set - _prev_ok),
-                "lost": len((_prev_ok - _ok_set) & _att_set),
-            }
-        )
-        _prev_ok = _ok_set
-    daily_churn = daily_churn[-14:]
+    # Epoch churn needs two epochs; this gives a live signal now. See
+    # _daily_churn_rows for the sampled-churn semantics.
+    daily_churn = _daily_churn_rows(session, now)[-14:]
 
     # --- Stuck sites (janitor signal) --------------------------------------
     cutoff = now - timedelta(minutes=settings.stale_minutes)
@@ -438,6 +452,30 @@ def create_app(token: str | None = None) -> Flask:
             log.warning("research render failed: %s", exc)
             stats = None
         return _render_research(stats, token_param=request.args.get("token", ""))
+
+    @app.get("/api/download/<name>")
+    def api_download(name):
+        spec = DATASETS.get(name)
+        if spec is None:
+            return jsonify({"error": "unknown dataset"}), 404
+        stamp = _utcnow().strftime("%Y%m%d")
+        fname = f"xl-i2p-study2-{name}-{stamp}.csv"
+        try:
+            stream = _csv_stream(name)
+            first = next(stream)  # fail fast on DB errors before headers go out
+        except Exception as exc:  # noqa: BLE001
+            log.warning("dataset download failed: %s", exc)
+            return jsonify({"error": "download unavailable", "detail": str(exc)}), 503
+
+        def _chained():
+            yield first
+            yield from stream
+
+        return Response(
+            stream_with_context(_chained()),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
 
     return app
 
@@ -722,6 +760,9 @@ svg.chart{width:100%;height:auto;background:#0d1424;border-radius:8px}
 .search{display:flex;gap:8px;margin-bottom:10px}
 .search input{flex:1;background:#0d1424;border:1px solid #22304f;border-radius:8px;color:#e6ecf5;padding:10px 12px;font-size:.9rem;font-family:ui-monospace,monospace}
 .btn{background:#2dd4bf;color:#06231f;border:none;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer}
+.dl-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.dl-btn{display:inline-block;font-size:.8rem;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf;border-radius:8px;padding:8px 14px;text-decoration:none}
+.dl-btn:hover{background:rgba(45,212,191,.12)}
 .timeline{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0;align-items:center}
 .dot{width:12px;height:12px;border-radius:50%;flex:none}
 .dot.ok{background:#2ecc71}.dot.no{background:#e74c3c;opacity:.75}.dot.warn{background:#f5a623}
@@ -946,6 +987,22 @@ th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;lette
 <div class="card">
   <h2>Churn</h2>
   __CHURN_HTML__
+</div>
+
+<div class="card">
+  <h2>Datasets</h2>
+  <p class="muted">Full-table CSV exports for analysis. Streamed, so large tables download without loading the dashboard.</p>
+  <div class="dl-grid">
+    <a class="dl-btn" href="/api/download/sites__R_TOKEN__" title="Eepsite registry: cohort, states, discovery provenance.">Sites</a>
+    <a class="dl-btn" href="/api/download/crawl_attempts__R_TOKEN__" title="Immutable verify/crawl attempts: the churn measurement base.">Crawl attempts</a>
+    <a class="dl-btn" href="/api/download/pages__R_TOKEN__" title="Crawled page observations, one row per URL per epoch.">Pages</a>
+    <a class="dl-btn" href="/api/download/links__R_TOKEN__" title="Hyperlink graph edges between eepsites.">Links</a>
+    <a class="dl-btn" href="/api/download/network_observations__R_TOKEN__" title="NetDB observations, provenance-separated by source.">Network observations</a>
+    <a class="dl-btn" href="/api/download/seed_events__R_TOKEN__" title="Discovery funnel: deduplicated discovery events.">Seed events</a>
+    <a class="dl-btn" href="/api/download/epochs__R_TOKEN__" title="Epoch ledger: labels, status, windows.">Epochs</a>
+    <a class="dl-btn" href="/api/download/cross_layer_observations__R_TOKEN__" title="LeaseSet lookup evidence per site.">Cross-layer observations</a>
+    <a class="dl-btn" href="/api/download/daily_churn__R_TOKEN__" title="Day-granular sampled churn series (full history).">Daily churn</a>
+  </div>
 </div>
 
 <div class="card">
@@ -1368,6 +1425,257 @@ def collect_site_history(session, host: str) -> dict | None:
             for o in xlayer
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# CSV dataset downloads (/api/download/<name>).
+#
+# One button per dataset on the Mission Control page. Full tables, streamed
+# row-by-row with a server-side cursor so multi-hundred-thousand-row exports
+# (links, attempts) never load into memory. Read-only: SELECTs only, same as
+# the rest of the app, behind the same token auth.
+# ---------------------------------------------------------------------------
+
+_CSV_CHUNK_ROWS = 500
+
+
+def _csv_cell(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def _streamed_rows(session, stmt):
+    """Yield row tuples from a SELECT via a server-side cursor."""
+    result = session.execute(
+        stmt, execution_options={"stream_results": True, "yield_per": 2000}
+    )
+    try:
+        for row in result:
+            yield tuple(row)
+    finally:
+        result.close()
+
+
+def _rows_sites(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            Site.id, Site.host, Site.base_url, Site.site_type, Site.state,
+            Site.source, Site.discovery_method, Site.is_cross_layer,
+            Site.network_source, Site.first_seen_at, Site.last_seen_at,
+            Site.last_checked_at, Site.last_crawled_at, Site.success_count,
+            Site.failure_count, Site.last_error_type,
+        ).order_by(Site.id),
+    )
+
+
+def _rows_crawl_attempts(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            CrawlAttempt.id, CrawlAttempt.site_id, CrawlAttempt.epoch_id,
+            CrawlAttempt.attempt_type, CrawlAttempt.started_at,
+            CrawlAttempt.finished_at, CrawlAttempt.status,
+            CrawlAttempt.discovery_source, CrawlAttempt.is_cross_layer,
+            CrawlAttempt.pages_fetched, CrawlAttempt.links_found,
+            CrawlAttempt.error_type,
+        ).order_by(CrawlAttempt.id),
+    )
+
+
+def _rows_pages(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            Page.id, Page.site_id, Page.epoch_id, Page.url, Page.depth,
+            Page.http_status, Page.content_type, Page.content_length,
+            Page.title, Page.word_count, Page.content_hash,
+            Page.fetched_at, Page.response_time_ms, Page.error_type,
+        ).order_by(Page.id),
+    )
+
+
+def _rows_links(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            Link.id, Link.source_site_id, Link.source_page_id,
+            Link.epoch_id, Link.target_host, Link.target_url,
+            Link.target_site_id, Link.anchor_text, Link.link_type,
+            Link.first_seen_at, Link.last_seen_at,
+        ).order_by(Link.id),
+    )
+
+
+def _rows_network_observations(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            NetworkObservation.id, NetworkObservation.host,
+            NetworkObservation.router_hash, NetworkObservation.epoch_id,
+            NetworkObservation.source_type, NetworkObservation.source_detail,
+            NetworkObservation.observed_at,
+        ).order_by(NetworkObservation.id),
+    )
+
+
+def _rows_seed_events(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            SeedEvent.id, SeedEvent.host, SeedEvent.source_type,
+            SeedEvent.source_detail, SeedEvent.epoch_id, SeedEvent.count,
+            SeedEvent.first_seen_at, SeedEvent.last_seen_at,
+        ).order_by(SeedEvent.id),
+    )
+
+
+def _rows_epochs(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            Epoch.id, Epoch.label, Epoch.status, Epoch.started_at,
+            Epoch.ended_at, Epoch.note,
+        ).order_by(Epoch.id),
+    )
+
+
+def _rows_cross_layer_observations(session):
+    yield from _streamed_rows(
+        session,
+        select(
+            CrossLayerObservation.id, CrossLayerObservation.site_id,
+            CrossLayerObservation.host, CrossLayerObservation.epoch_id,
+            CrossLayerObservation.lookup_method,
+            CrossLayerObservation.leaseset_found,
+            CrossLayerObservation.canonical_b32,
+            CrossLayerObservation.confidence,
+            CrossLayerObservation.observed_at,
+        ).order_by(CrossLayerObservation.id),
+    )
+
+
+def _rows_daily_churn(session):
+    cols = ("day", "attempted", "reachable", "newly_reachable", "lost")
+    for r in _daily_churn_rows(session, _utcnow(), days=None):
+        yield tuple(r[c] for c in cols)
+
+
+DATASETS: dict[str, dict] = {
+    "sites": {
+        "label": "Sites",
+        "blurb": "Eepsite registry: cohort, states, discovery provenance.",
+        "columns": [
+            "id", "host", "base_url", "site_type", "state", "source",
+            "discovery_method", "is_cross_layer", "network_source",
+            "first_seen_at", "last_seen_at", "last_checked_at",
+            "last_crawled_at", "success_count", "failure_count",
+            "last_error_type",
+        ],
+        "rows": _rows_sites,
+    },
+    "crawl_attempts": {
+        "label": "Crawl attempts",
+        "blurb": "Immutable verify/crawl attempts: the churn measurement base.",
+        "columns": [
+            "id", "site_id", "epoch_id", "attempt_type", "started_at",
+            "finished_at", "status", "discovery_source", "is_cross_layer",
+            "pages_fetched", "links_found", "error_type",
+        ],
+        "rows": _rows_crawl_attempts,
+    },
+    "pages": {
+        "label": "Pages",
+        "blurb": "Crawled page observations, one row per URL per epoch.",
+        "columns": [
+            "id", "site_id", "epoch_id", "url", "depth", "http_status",
+            "content_type", "content_length", "title", "word_count",
+            "content_hash", "fetched_at", "response_time_ms", "error_type",
+        ],
+        "rows": _rows_pages,
+    },
+    "links": {
+        "label": "Links",
+        "blurb": "Hyperlink graph edges between eepsites.",
+        "columns": [
+            "id", "source_site_id", "source_page_id", "epoch_id",
+            "target_host", "target_url", "target_site_id", "anchor_text",
+            "link_type", "first_seen_at", "last_seen_at",
+        ],
+        "rows": _rows_links,
+    },
+    "network_observations": {
+        "label": "Network observations",
+        "blurb": "NetDB observations, provenance-separated by source.",
+        "columns": [
+            "id", "host", "router_hash", "epoch_id", "source_type",
+            "source_detail", "observed_at",
+        ],
+        "rows": _rows_network_observations,
+    },
+    "seed_events": {
+        "label": "Seed events",
+        "blurb": "Discovery funnel: deduplicated discovery events.",
+        "columns": [
+            "id", "host", "source_type", "source_detail", "epoch_id",
+            "count", "first_seen_at", "last_seen_at",
+        ],
+        "rows": _rows_seed_events,
+    },
+    "epochs": {
+        "label": "Epochs",
+        "blurb": "Epoch ledger: labels, status, windows.",
+        "columns": ["id", "label", "status", "started_at", "ended_at", "note"],
+        "rows": _rows_epochs,
+    },
+    "cross_layer_observations": {
+        "label": "Cross-layer observations",
+        "blurb": "LeaseSet lookup evidence per site.",
+        "columns": [
+            "id", "site_id", "host", "epoch_id", "lookup_method",
+            "leaseset_found", "canonical_b32", "confidence", "observed_at",
+        ],
+        "rows": _rows_cross_layer_observations,
+    },
+    "daily_churn": {
+        "label": "Daily churn",
+        "blurb": "Day-granular sampled churn series (full history).",
+        "columns": ["day", "attempted", "reachable", "newly_reachable", "lost"],
+        "rows": _rows_daily_churn,
+    },
+}
+
+
+def _csv_stream(name: str):
+    """Yield CSV text chunks for a dataset; session stays open across chunks."""
+    spec = DATASETS[name]
+    session = db.SessionLocal()
+    try:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(spec["columns"])
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        n = 0
+        for row in spec["rows"](session):
+            writer.writerow([_csv_cell(v) for v in row])
+            n += 1
+            if n >= _CSV_CHUNK_ROWS:
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+                n = 0
+        tail = buf.getvalue()
+        if tail:
+            yield tail
+    finally:
+        session.close()
 
 
 def main() -> None:
