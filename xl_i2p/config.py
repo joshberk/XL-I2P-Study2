@@ -74,6 +74,15 @@ class Settings:
 
     # --- Crawl loop (Study 1 validation defaults) ---
     verify_limit: int = _int("VERIFY_LIMIT", 100)
+    # Split-budget verification: fraction of each verify batch reserved for
+    # re-verifying the longitudinal cohort (REACHABLE/CRAWLED/RETRY_READY,
+    # oldest-checked first); the rest sweeps the discovery backlog
+    # (never-checked first). Without the reservation, the never-checked
+    # backlog (tens of thousands of seeds plus the daily lease-set feed)
+    # starves cohort re-verification and the churn signal on known sites goes
+    # quiet. 0.0 = discovery only, 1.0 = cohort only; unused budget in either
+    # pool flows to the other.
+    verify_cohort_share: float = _float("VERIFY_COHORT_SHARE", 0.5)
     crawl_limit: int = _int("CRAWL_LIMIT", 20)
     sleep_seconds: int = _int("SLEEP_SECONDS", 300)
     max_concurrent_requests: int = _int("MAX_CONCURRENT_REQUESTS", 5)

@@ -37,6 +37,14 @@ VERIFY_STATES = [
     SiteState.CRAWLED.value,
     SiteState.ERROR.value,
 ]
+# Longitudinal cohort: known sites whose survival the study must track.
+# These get a reserved share of every verify batch (oldest-checked first) so
+# re-verification is never starved by the never-checked discovery backlog.
+COHORT_STATES = [
+    SiteState.REACHABLE.value,
+    SiteState.CRAWLED.value,
+    SiteState.RETRY_READY.value,
+]
 
 TERMINAL_STATES = (SiteState.UNREACHABLE.value, SiteState.ERROR.value)
 # Proxy failures are environmental: retry soon without burning the retry budget.
@@ -47,25 +55,12 @@ PROXY_ERRORS = {
 }
 
 
-def select_sites_for_verification(
-    session: Session, limit: int, epoch: Epoch
-) -> list[tuple[int, str, int]]:
-    """Claim up to ``limit`` sites for verification; returns (site_id, base_url, attempt_id)."""
-    terminal_checked_this_epoch = and_(
-        Site.state.in_(TERMINAL_STATES),
-        Site.last_checked_at.is_not(None),
-        Site.last_checked_at >= epoch.started_at,
-    )
-    stmt = (
-        select(Site)
-        .where(
-            Site.state.in_(VERIFY_STATES),
-            or_(Site.next_retry_at.is_(None), Site.next_retry_at <= now()),
-            not_(terminal_checked_this_epoch),
-        )
-        .order_by(Site.last_checked_at.is_not(None), Site.last_checked_at.asc(), Site.id.asc())
-        .limit(limit)
-    )
+def _claim_verify_jobs(session: Session, stmt, epoch: Epoch) -> list[tuple[int, str, int]]:
+    """Claim the sites selected by ``stmt`` for verification.
+
+    Marks each VERIFYING and records a VERIFY attempt; returns
+    (site_id, base_url, attempt_id) tuples.
+    """
     jobs: list[tuple[int, str, int]] = []
     for site in session.scalars(stmt):
         site.state = SiteState.VERIFYING.value
@@ -81,6 +76,67 @@ def select_sites_for_verification(
         session.flush()
         jobs.append((site.id, site.base_url, attempt.id))
     session.commit()
+    return jobs
+
+
+def select_sites_for_verification(
+    session: Session, limit: int, epoch: Epoch
+) -> list[tuple[int, str, int]]:
+    """Claim up to ``limit`` sites for verification; returns (site_id, base_url, attempt_id).
+
+    Split-budget selection: ``settings.verify_cohort_share`` of the batch is
+    reserved for re-verifying the longitudinal cohort (REACHABLE / CRAWLED /
+    RETRY_READY, oldest-checked first); the remainder sweeps the discovery
+    backlog (never-checked first, then oldest). Without the reservation, the
+    never-checked backlog (tens of thousands of seeds plus the daily
+    lease-set feed) starves cohort re-verification, and the churn/survival
+    signal on known sites goes quiet.
+
+    Unused budget in either pool flows to the other, so the full ``limit`` is
+    used whenever eligible sites exist. Backoff (``next_retry_at``) and the
+    terminal-for-epoch exclusion are honored in both pools.
+    """
+    share = min(1.0, max(0.0, settings.verify_cohort_share))
+    cohort_limit = int(round(limit * share))
+
+    terminal_checked_this_epoch = and_(
+        Site.state.in_(TERMINAL_STATES),
+        Site.last_checked_at.is_not(None),
+        Site.last_checked_at >= epoch.started_at,
+    )
+    retry_due = or_(Site.next_retry_at.is_(None), Site.next_retry_at <= now())
+    eligible = not_(terminal_checked_this_epoch)
+    # Never-checked first, then oldest-checked; shared by both pools.
+    freshness_order = (
+        Site.last_checked_at.is_not(None),
+        Site.last_checked_at.asc(),
+        Site.id.asc(),
+    )
+
+    cohort_stmt = (
+        select(Site)
+        .where(
+            Site.state.in_(COHORT_STATES),
+            retry_due,
+            eligible,
+        )
+        .order_by(*freshness_order)
+        .limit(cohort_limit)
+    )
+    jobs = _claim_verify_jobs(session, cohort_stmt, epoch)
+
+    discovery_stmt = (
+        select(Site)
+        .where(
+            Site.state.in_(VERIFY_STATES),
+            not_(Site.state.in_(COHORT_STATES)),
+            retry_due,
+            eligible,
+        )
+        .order_by(*freshness_order)
+        .limit(max(0, limit - len(jobs)))
+    )
+    jobs += _claim_verify_jobs(session, discovery_stmt, epoch)
     return jobs
 
 
