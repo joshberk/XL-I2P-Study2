@@ -183,11 +183,23 @@ in the methods.
 
 ### Epoch rollover (automatic)
 
-Epochs roll automatically every `EPOCH_DURATION_DAYS` (default 30):
+Epochs roll automatically every `EPOCH_DURATION_DAYS` (default 30). The
+rollover runs on **VM2**, where the database lives, so the frozen export
+(CSVs + SQL dump + SHA-256 manifest) is DB-local and never competes with
+the crawler for VM1's disk/CPU:
 
 ```bash
-sudo cp systemd/xl-i2p-epoch-rollover.service systemd/xl-i2p-epoch-rollover.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now xl-i2p-epoch-rollover.timer
+# on VM2, as root: create the write-capable rollover DB user first
+mysql -e "CREATE USER 'rollover'@'localhost' IDENTIFIED BY '<password>'; \
+  GRANT SELECT ON xl_i2p_study2.* TO 'rollover'@'localhost'; \
+  GRANT INSERT, UPDATE ON xl_i2p_study2.epochs TO 'rollover'@'localhost';"
+# /opt/xl-i2p/rollover.env (chmod 600):
+#   DATABASE_URL=mysql+pymysql://rollover:<password>@127.0.0.1:3306/xl_i2p_study2?charset=utf8mb4
+#   EXPORT_DIR=/opt/xl-i2p/exports
+sudo cp systemd/xl-i2p-epoch-rollover-vm2.service systemd/xl-i2p-epoch-rollover-vm2.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now xl-i2p-epoch-rollover-vm2.timer
+# on VM1: the old timer is retired
+sudo systemctl disable --now xl-i2p-epoch-rollover.timer
 ```
 
 The timer runs `epoch rollover --export-closed` daily; it is a no-op until
@@ -195,7 +207,8 @@ the open epoch reaches its max age, then it closes the epoch, exports it
 (CSVs + SQL dump + SHA-256 manifest), and opens the next one (label
 auto-incremented, e.g. `2026-Q4` → `2026-Q4-02`). The running crawler
 detects the rollover on its next cycle and switches to the new epoch, and
-it also rolls over by itself as a backstop if the timer ever misses.
+it also rolls over by itself as a backstop if the timer ever misses
+(the backstop rolls without exporting, same as before).
 Set `EPOCH_AUTO_ROLLOVER=false` to return to fully manual epochs.
 
 Manual rollover (if ever needed):
