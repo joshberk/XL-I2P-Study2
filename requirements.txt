@@ -4,7 +4,12 @@ httpx>=0.27
 typer>=0.12
 rich>=13.0
 beautifulsoup4>=4.12
-lxml>=5.0
+lxml>=6.1.0
+# Transitive-dependency security floors (Snyk, 2026-10-15). Not imported
+# directly, but pip respects these pins on fresh installs/upgrades.
+soupsieve>=2.8.4  # via beautifulsoup4 (ReDoS, CWE-1333/770)
+pygments>=2.20.0  # via rich (ReDoS, CWE-1333)
+zipp>=3.19.1  # transitive (infinite loop, CWE-835)
 PyMySQL>=1.1
 python-dotenv>=1.0
 flask>=3.0

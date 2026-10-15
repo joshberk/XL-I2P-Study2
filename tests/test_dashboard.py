@@ -393,3 +393,24 @@ def test_download_registry_covers_all_tables(app):
         "network_observations", "seed_events", "epochs",
         "cross_layer_observations", "daily_churn",
     }
+
+
+def test_token_param_xss_neutralized():
+    """CWE-79: a hostile ?token= must not break out of the JS string literal.
+
+    The old hand-rolled backslash/quote escaping did not stop a
+    </script> breakout (HTML is parsed before JS). The token is now
+    embedded via json.dumps with <>& neutralized as \\uXXXX escapes.
+    """
+    import re
+
+    evil = '</script><script>alert(document.domain)</script>"\\\n\'&<b>'
+    for render in (dash_mod._render, dash_mod._render_research):
+        html = render(None, evil)
+        # The attacker's literal </script> must not survive into the page.
+        assert "</script><script>" not in html
+        # The embedded literal must still round-trip to the original token
+        # (so legitimate tokens keep working).
+        m = re.search(r"const TOKEN_QS = (.*?);", html)
+        assert m, "TOKEN_QS literal missing from rendered page"
+        assert json.loads(m.group(1)) == evil

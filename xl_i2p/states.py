@@ -44,6 +44,8 @@ class ErrorType(str, Enum):
     CONNECT_TIMEOUT = "CONNECT_TIMEOUT"
     READ_TIMEOUT = "READ_TIMEOUT"
     WRITE_TIMEOUT = "WRITE_TIMEOUT"
+    FETCH_DEADLINE = "FETCH_DEADLINE"  # total wall-clock fetch deadline exceeded
+    SITE_BUDGET_EXHAUSTED = "SITE_BUDGET_EXHAUSTED"  # per-site crawl budget exhausted
     CONNECTION_REFUSED = "CONNECTION_REFUSED"
     TLS_ERROR = "TLS_ERROR"
     # HTTP

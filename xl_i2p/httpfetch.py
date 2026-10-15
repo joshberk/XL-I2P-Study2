@@ -34,24 +34,65 @@ class FetchResult:
     error_message: str | None
 
 
+# Monotonic timestamp of the last completed fetch (success or failure).
+# The scheduler's watchdog heartbeat reads this to report progress age: a
+# fresh heartbeat with a stale completion timestamp means "alive but stuck".
+# Updated by fetch_bounded, which both the crawler and verifier use, so all
+# fetch completions are covered. Single event loop: no lock needed.
+last_fetch_completed_at: float | None = None
+
+
+def _mark_fetch_completed() -> None:
+    global last_fetch_completed_at
+    last_fetch_completed_at = time.monotonic()
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def is_parseable_content_type(content_type: str | None) -> bool:
+    """Whether a response body is worth downloading for link extraction.
+
+    Missing/empty content-type is treated as parseable (some eepsites omit
+    it); only an explicit non-HTML type aborts the download early. Mirrors
+    the crawler's post-download ``page_is_html`` check so the pre-download
+    fast-fail never disagrees with it.
+    """
+    if not content_type:
+        return True
+    ct = content_type.lower()
+    return "html" in ct or "text/plain" in ct
+
+
 async def fetch_bounded(
     client: httpx.AsyncClient, url: str, cap_bytes: int | None = None,
     timeout_seconds: float | None = None,
 ) -> FetchResult:
     """GET ``url`` without ever buffering more than ``cap_bytes``.
 
-    Two early exits, both reported as CONTENT_TOO_LARGE (the same outcome
-    the old code produced, minus the multi-hour download):
+    Three early exits before/during the download:
       1. the ``content-length`` header already exceeds the cap -> abort
-         before reading any body bytes;
-      2. the streamed body crosses the cap mid-download -> abort and
-         discard the partial buffer.
+         before reading any body bytes (CONTENT_TOO_LARGE);
+      2. the ``content-type`` header declares a non-parseable type (e.g.
+         an ISO image) -> abort before reading any body bytes
+         (NON_HTML_CONTENT);
+      3. the streamed body crosses the cap mid-download -> abort and
+         discard the partial buffer (CONTENT_TOO_LARGE).
 
     A total wall-clock deadline (``timeout_seconds``, default
     ``FETCH_TOTAL_TIMEOUT_SECONDS``) bounds the whole fetch. httpx's
     per-operation timeout cannot do this: a server that keeps dribbling
     bytes defeats per-read timeouts. Exceeding the deadline is reported
-    as READ_TIMEOUT, never raised.
+    as FETCH_DEADLINE (queryable separately from READ_TIMEOUT), never raised.
+
+    ``elapsed_ms`` measures the full transfer (headers + body until the
+    return point), not time-to-headers.
+
+    The timeout catch is version-robust: on Python 3.10
+    ``asyncio.TimeoutError`` is a distinct class from the builtin
+    ``TimeoutError`` (unified in 3.11), and ``asyncio.wait_for`` raises
+    the asyncio one.
     """
     cap = settings.max_content_bytes if cap_bytes is None else cap_bytes
     total_timeout = (
@@ -61,17 +102,19 @@ async def fetch_bounded(
     started = time.perf_counter()
     try:
         if total_timeout is not None:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 _fetch_bounded_inner(client, url, cap, started), total_timeout
             )
-        return await _fetch_bounded_inner(client, url, cap, started)
-    except TimeoutError:
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        return FetchResult(
-            url, None, None, None, elapsed_ms,
-            ErrorType.READ_TIMEOUT.value,
+        else:
+            result = await _fetch_bounded_inner(client, url, cap, started)
+    except (asyncio.TimeoutError, TimeoutError):
+        result = FetchResult(
+            url, None, None, None, _elapsed_ms(started),
+            ErrorType.FETCH_DEADLINE.value,
             f"total fetch deadline exceeded ({total_timeout}s)",
         )
+    _mark_fetch_completed()
+    return result
 
 
 async def _fetch_bounded_inner(
@@ -81,15 +124,22 @@ async def _fetch_bounded_inner(
         async with client.stream(
             "GET", url, headers={"User-Agent": settings.user_agent}
         ) as response:
-            elapsed_ms = int((time.perf_counter() - started) * 1000)
             content_type = response.headers.get("content-type")
+            if not is_parseable_content_type(content_type):
+                return FetchResult(
+                    url, response.status_code, content_type, None,
+                    _elapsed_ms(started), ErrorType.NON_HTML_CONTENT.value,
+                    f"content-type {content_type!r} is not parseable; "
+                    "download skipped",
+                )
             declared = response.headers.get("content-length")
             if declared is not None:
                 try:
                     if int(declared) > cap:
                         return FetchResult(
                             url, response.status_code, content_type, None,
-                            elapsed_ms, ErrorType.CONTENT_TOO_LARGE.value,
+                            _elapsed_ms(started),
+                            ErrorType.CONTENT_TOO_LARGE.value,
                             "content-length exceeded limit",
                         )
                 except (TypeError, ValueError):
@@ -102,14 +152,15 @@ async def _fetch_bounded_inner(
                 if total > cap:
                     return FetchResult(
                         url, response.status_code, content_type, None,
-                        elapsed_ms, ErrorType.CONTENT_TOO_LARGE.value,
+                        _elapsed_ms(started),
+                        ErrorType.CONTENT_TOO_LARGE.value,
                         "content exceeded limit",
                     )
             content = b"".join(chunks)
         error_type, error_message = classify_http_status(response.status_code, content)
         return FetchResult(
-            url, response.status_code, content_type, content, elapsed_ms,
-            error_type, error_message,
+            url, response.status_code, content_type, content,
+            _elapsed_ms(started), error_type, error_message,
         )
     except Exception as exc:
         error_type, error_message = classify_exception(exc)

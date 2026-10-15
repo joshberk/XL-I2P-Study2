@@ -15,6 +15,7 @@ import time
 from .config import settings
 from .crawler import crawl_batch
 from .epochs import get_open_epoch, rollover_if_due
+from . import httpfetch
 from .logging_setup import write_heartbeat
 from .models import Epoch
 from .proxy import tcp_proxy_available
@@ -36,8 +37,20 @@ async def _heartbeat_watchdog(
     dashboard can distinguish "wedged" (watchdog fresh, phase stuck) from
     "dead" (nothing fresh). ``label_box`` is a mutable mapping holding the
     current epoch label, updated by the loop on rollover.
+
+    Each beat also carries ``seconds_since_last_fetch`` (time since any
+    fetch completed): a fresh heartbeat with a stale completion timestamp
+    means "alive but stuck", not "healthy". The timeout catch is
+    version-robust: on Python 3.10 ``asyncio.TimeoutError`` is distinct
+    from the builtin (unified in 3.11), and an uncaught timeout would
+    silently kill this task.
     """
     while not stop.is_set():
+        last_completed = httpfetch.last_fetch_completed_at
+        counters["seconds_since_last_fetch"] = (
+            round(time.monotonic() - last_completed, 1)
+            if last_completed is not None else None
+        )
         try:
             await asyncio.to_thread(
                 write_heartbeat, label_box.get("epoch_label"), "watchdog", counters
@@ -46,7 +59,7 @@ async def _heartbeat_watchdog(
             logger.debug("watchdog heartbeat failed", exc_info=True)
         try:
             await asyncio.wait_for(stop.wait(), timeout=settings.heartbeat_seconds)
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             pass
 
 

@@ -69,6 +69,24 @@ enabled, MariaDB 10.6+.
   harvesting is disabled unless `FLOODFILL_MODE=true`. Floodfill needs a
   public IP + inbound UDP/TCP (Network: OK); our VM1 had no public IP,
   so the default build is client-mode only.
+- **Bounded fetching** (`xl_i2p/httpfetch.py`): responses stream with a
+  2 MB cap (`MAX_CONTENT_BYTES`), a per-fetch total wall-clock deadline
+  (`FETCH_TOTAL_TIMEOUT_SECONDS`, 180 s; httpx has no total-transfer
+  timeout, so a trickling server would otherwise hold a fetch open for
+  hours), and a content-type fast-fail (non-HTML skipped before any body
+  bytes are read). Deadline kills are `FETCH_DEADLINE`, kept separate
+  from `READ_TIMEOUT`.
+- **Per-site crawl budget** (`xl_i2p/crawler.py`): each site gets
+  `SITE_BUDGET_SECONDS` (900 s) of wall-clock time; each fetch takes the
+  tighter of the fetch deadline and the site remainder. Exhaustion keeps
+  the partial crawl and marks the attempt `SITE_BUDGET_EXHAUSTED`
+  (truncated, not unreachable).
+- **Progress-aware watchdog** (`xl_i2p/scheduler.py`): an independent
+  heartbeat task fires every `heartbeat_seconds` and reports
+  `seconds_since_last_fetch`; the dashboard shows "last fetch Ns ago" next
+  to the liveness pill, so "alive but stuck" is distinguishable from
+  "healthy". `response_time_ms` measures the full transfer
+  (headers + body), not time-to-headers.
 
 ## Deployment runbook
 

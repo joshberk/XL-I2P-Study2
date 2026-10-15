@@ -177,6 +177,7 @@ def _collect(session) -> dict:
             "seconds_ago": int(age_s),
             "phase": latest.phase,
             "cycles": counters.get("cycles"),
+            "seconds_since_last_fetch": counters.get("seconds_since_last_fetch"),
         }
 
     heartbeats = []
@@ -480,6 +481,23 @@ def create_app(token: str | None = None) -> Flask:
     return app
 
 
+def _js_string_literal(value: str) -> str:
+    """Render a string as a JS string literal safe to inline in <script>.
+
+    ``json.dumps`` produces a valid double-quoted JS string (handles
+    quotes, backslashes, newlines and control characters); the ``<>&``
+    replacements keep the HTML parser — which runs before the JS parser —
+    from seeing a premature ``</script>``. Hand-rolled backslash/quote
+    escaping alone is NOT sufficient (CWE-79).
+    """
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def _render(stats: dict | None, token_param: str) -> str:
     """Server-render the dashboard; JS re-fetches /api/stats every 60s."""
     s = stats or {}
@@ -557,6 +575,10 @@ def _render(stats: dict | None, token_param: str) -> str:
     last_seen_txt = (
         _age_str(datetime.fromisoformat(live["last_seen"])) if live.get("last_seen") else "never"
     )
+    since_fetch = live.get("seconds_since_last_fetch")
+    live_fetch_txt = (
+        f"{since_fetch:.0f}s ago" if isinstance(since_fetch, (int, float)) else "—"
+    )
 
     def _daily_churn_table() -> str:
         rows = s.get("daily_churn") or []
@@ -600,6 +622,7 @@ def _render(stats: dict | None, token_param: str) -> str:
     html = html.replace("__LIVE_CLASS__", live_class)
     html = html.replace("__LIVE_STATUS__", str(live.get("status", "UNKNOWN")))
     html = html.replace("__LIVE_SEEN__", last_seen_txt)
+    html = html.replace("__LIVE_FETCH__", live_fetch_txt)
     html = html.replace("__COHORT_TOTAL__", str(cohort.get("total", 0)))
     html = html.replace("__STATE_CELLS__", _state_cells())
     html = html.replace("__VERIFY__", str((s.get("this_epoch") or {}).get("verify_attempts", "—")))
@@ -624,8 +647,7 @@ def _render(stats: dict | None, token_param: str) -> str:
         ", ".join(stuck.get("hosts") or []) or "none",
     )
     html = html.replace("__STATS_JSON__", stats_json.replace("</", "<\\/"))
-    safe_token = token_param.replace("\\", "\\\\").replace('"', '\\"')
-    html = html.replace("__TOKEN_QS__", safe_token)
+    html = html.replace("__TOKEN_QS__", _js_string_literal(token_param))
     html = html.replace(
         "__R_TOKEN__",
         "?token=" + urllib.parse.quote(token_param, safe="") if token_param else "",
@@ -713,8 +735,7 @@ def _render_research(stats: dict | None, token_param: str) -> str:
     html = html.replace("__LEDGER_ROWS__", _ledger_rows())
     html = html.replace("__FUNNEL__", _funnel())
     html = html.replace("__FLAP_ROWS__", _flap_rows())
-    safe_token = token_param.replace("\\", "\\\\").replace('"', '\\"')
-    html = html.replace("__TOKEN_QS__", safe_token)
+    html = html.replace("__TOKEN_QS__", _js_string_literal(token_param))
     html = html.replace("__REFRESH_MS__", str(RESEARCH_REFRESH_MS))
     return html
 
@@ -821,7 +842,7 @@ a.navlink{font-size:.78rem;color:#2dd4bf;background:#16203a;padding:6px 14px;bor
 <div class="foot" id="r-updated"></div>
 
 <script>
-const TOKEN_QS = "__TOKEN_QS__";
+const TOKEN_QS = __TOKEN_QS__;
 const REFRESH_MS = __REFRESH_MS__;
 function qs(){ return TOKEN_QS ? "?token=" + encodeURIComponent(TOKEN_QS) : ""; }
 (function(){ const b = document.getElementById("r-back"); if (b) b.href = "/" + qs(); })();
@@ -953,6 +974,7 @@ th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;lette
   <span class="pill __LIVE_CLASS__" id="live-pill"><span class="dot"></span><b id="live-status">__LIVE_STATUS__</b></span>
   <span class="chip">epoch <b class="mono" id="epoch-label">__EPOCH_LABEL__</b> &middot; <span id="epoch-age">__AGE_DAYS__ days</span> old &middot; rollover in <span id="epoch-roll">__ROLLOVER_DAYS__</span>d</span>
   <span class="chip">last beat <span id="live-seen">__LIVE_SEEN__</span></span>
+  <span class="chip">last fetch <span id="live-fetch">__LIVE_FETCH__</span></span>
   <a class="navlink" href="/research__R_TOKEN__">Research archive &rarr;</a>
 </div>
 
@@ -1017,7 +1039,7 @@ th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;lette
 <div class="foot" id="updated"></div>
 
 <script>
-const TOKEN_QS = "__TOKEN_QS__";
+const TOKEN_QS = __TOKEN_QS__;
 let boot = __STATS_JSON__;
 function qs(){ return TOKEN_QS ? "?token=" + encodeURIComponent(TOKEN_QS) : ""; }
 function set(id, v){ const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.textContent = v; }
@@ -1031,6 +1053,7 @@ function apply(s){
   if (pill) pill.className = pillClass(l.status);
   set("live-status", l.status);
   set("live-seen", l.last_seen ? new Date(l.last_seen + "Z").toLocaleString() : "never");
+  set("live-fetch", (typeof l.seconds_since_last_fetch === "number") ? Math.round(l.seconds_since_last_fetch) + "s ago" : "—");
   set("epoch-label", e.label || "none");
   set("epoch-age", (e.age_days ?? "—") + " days");
   set("epoch-roll", e.days_until_rollover ?? "—");

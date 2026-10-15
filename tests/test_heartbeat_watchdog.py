@@ -55,3 +55,36 @@ def test_watchdog_survives_write_failures(monkeypatch):
         await asyncio.wait_for(task, timeout=5)
 
     asyncio.run(go())  # must not raise
+
+
+def test_watchdog_reports_progress_age(monkeypatch):
+    import time
+
+    import xl_i2p.httpfetch as httpfetch_mod
+
+    seen = []
+    monkeypatch.setattr(
+        sched_mod, "write_heartbeat",
+        lambda label, phase, counters, log_dir=None: seen.append(dict(counters)),
+    )
+    fast = dataclasses.replace(Settings(), heartbeat_seconds=0.05)
+    monkeypatch.setattr(sched_mod, "settings", fast)
+    # Pretend a fetch completed ~42s ago: the beat must carry that age so
+    # the dashboard can tell "alive but stuck" from "healthy".
+    monkeypatch.setattr(
+        httpfetch_mod, "last_fetch_completed_at", time.monotonic() - 42)
+
+    async def go():
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            _heartbeat_watchdog({"epoch_label": "e1"}, {}, stop))
+        await asyncio.sleep(0.15)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(go())
+    assert seen, "watchdog never fired"
+    for counters in seen:
+        age = counters.get("seconds_since_last_fetch")
+        assert isinstance(age, float) and 40 < age < 60, (
+            f"bad progress age: {age}")

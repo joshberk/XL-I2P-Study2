@@ -96,6 +96,11 @@ class Settings:
     max_depth_per_site: int = _int("MAX_DEPTH_PER_SITE", 2)
     crawl_delay_seconds: float = _float("CRAWL_DELAY_SECONDS", 2)
     max_content_bytes: int = _int("MAX_CONTENT_BYTES", 2_000_000)
+    # Per-site wall-clock budget for a full crawl (all pages + politeness
+    # delays). Bounds the combined cost of many individually-slow pages.
+    # Kept under STALE_MINUTES so the janitor/stuck-site semantics hold.
+    # Truncation is recorded as SITE_BUDGET_EXHAUSTED, not a failure.
+    site_budget_seconds: float = _float("SITE_BUDGET_SECONDS", 900)
 
     # --- Cross-layer Tier 1 (client-mode; works without a public IP) ---
     # Per-cycle bounded association pass (SAM naming + LeaseSet lookup).

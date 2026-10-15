@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy import select
 
 from . import __version__
 from .config import settings
@@ -72,6 +73,34 @@ def epoch_open(
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1)
     console.print(f"[green]Opened epoch '{epoch.label}' (id={epoch.id}).[/green]")
+
+
+@epoch_app.command("note")
+def epoch_note(
+    text: str = typer.Argument(..., help="Note text to append."),
+    label: str = typer.Option("", help="Epoch label (default: the open epoch)."),
+) -> None:
+    """Append a timestamped note to an epoch (e.g. mid-epoch config changes).
+
+    Measurement-affecting changes deployed mid-epoch must be recorded here
+    so the analysis can treat them as known breakpoints.
+    """
+    from datetime import datetime, timezone
+
+    from .models import Epoch
+    with session_scope() as session:
+        if label:
+            epoch = session.scalar(select(Epoch).where(Epoch.label == label))
+        else:
+            epoch = get_open_epoch(session)
+        if epoch is None:
+            console.print("[red]No matching epoch.[/red]")
+            raise typer.Exit(1)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        entry = f"[{stamp}] {text}"
+        epoch.note = f"{epoch.note}\n\n{entry}" if epoch.note else entry
+        session.commit()
+    console.print(f"[green]Note appended to epoch '{epoch.label}'.[/green]")
 
 
 @epoch_app.command("close")

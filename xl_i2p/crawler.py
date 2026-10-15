@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import Counter, deque
 from urllib.parse import urlparse
 
@@ -24,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .httpfetch import FetchResult, fetch_bounded
+from .httpfetch import FetchResult, fetch_bounded, is_parseable_content_type
 from .models import CrawlAttempt, Epoch, Link, Page, Site, now
 from .parser import parse_html
 from .proxy import tcp_proxy_available
@@ -76,17 +77,18 @@ def select_sites_for_crawling(
     return jobs
 
 
-async def fetch(client: httpx.AsyncClient, url: str) -> FetchResult:
+async def fetch(
+    client: httpx.AsyncClient, url: str, timeout_seconds: float | None = None
+) -> FetchResult:
     """Fetch one URL, never buffering more than ``max_content_bytes``."""
-    return await fetch_bounded(client, url)
+    return await fetch_bounded(client, url, timeout_seconds=timeout_seconds)
 
 
 def page_is_html(result: FetchResult) -> bool:
     if result.content is None:
         return False
-    if result.content_type is None:
-        return True
-    return "html" in result.content_type.lower() or "text/plain" in result.content_type.lower()
+    # Shared with httpfetch's pre-download fast-fail so the two never disagree.
+    return is_parseable_content_type(result.content_type)
 
 
 def save_page_result(
@@ -192,58 +194,88 @@ async def _crawl_one_site_inner(
     queue: deque[tuple[str, int]] = deque([(site.base_url, 0)])
     seen_urls: set[str] = set()
 
+    # Per-site wall-clock budget: bounds the combined cost of many
+    # individually-slow pages plus politeness delays. Each fetch gets the
+    # tighter of the fetch default and the site remainder, so no fetch
+    # starts that cannot finish inside the budget. On exhaustion the
+    # partial crawl is kept and marked SITE_BUDGET_EXHAUSTED (truncated,
+    # not unreachable). Version-robust catch: on Python 3.10
+    # asyncio.TimeoutError is distinct from the builtin (unified in 3.11).
+    site_budget = settings.site_budget_seconds
+    fetch_default_timeout = settings.fetch_total_timeout_seconds
+    site_deadline = time.monotonic() + site_budget
+    truncated = False
+
+    async def _crawl_pages(client: httpx.AsyncClient) -> None:
+        nonlocal truncated
+        while queue and counts["pages_fetched"] < settings.max_pages_per_site:
+            url, depth = queue.popleft()
+            normalized = normalize_url(url)
+            if normalized in seen_urls or depth > settings.max_depth_per_site:
+                continue
+            seen_urls.add(normalized)
+
+            remaining = site_deadline - time.monotonic()
+            if remaining <= 0:
+                truncated = True
+                logger.warning("site %s: budget exhausted after %d pages",
+                               site.host, counts["pages_fetched"])
+                break
+            result = await fetch(
+                client, normalized,
+                timeout_seconds=min(fetch_default_timeout, remaining),
+            )
+            page = save_page_result(session, site, result, depth, epoch_id)
+            counts["pages_fetched"] += 1
+
+            if result.error_type:
+                counts["errors"] += 1
+                page_errors[result.error_type] += 1
+                session.commit()
+                continue
+
+            if not page_is_html(result):
+                page.error_type = ErrorType.NON_HTML_CONTENT.value
+                page_errors[ErrorType.NON_HTML_CONTENT.value] += 1
+                counts["errors"] += 1
+                session.commit()
+                continue
+
+            try:
+                parsed = parse_html(result.content or b"", normalized)
+                page.title = parsed.title
+                page.text_length = parsed.text_length
+                page.word_count = parsed.word_count
+                page.content_hash = parsed.content_hash
+                for link in parsed.links:
+                    save_link(session, site, page, link.url, link.host, link.anchor_text, epoch_id)
+                    counts["links_found"] += 1
+                    if link.host == site.host and depth + 1 <= settings.max_depth_per_site:
+                        queue.append((link.url, depth + 1))
+                session.commit()
+            except Exception as exc:
+                error_type, error_message = classify_exception(exc)
+                page.error_type = ErrorType.PARSER_ERROR.value
+                page.error_message = f"{error_type}: {error_message}"
+                page_errors[ErrorType.PARSER_ERROR.value] += 1
+                counts["errors"] += 1
+                session.commit()
+
+            if settings.crawl_delay_seconds > 0:
+                await asyncio.sleep(settings.crawl_delay_seconds)
+
     try:
         async with httpx.AsyncClient(
             proxy=settings.i2p_http_proxy,
             timeout=settings.request_timeout_seconds,
             follow_redirects=True,
         ) as client:
-            while queue and counts["pages_fetched"] < settings.max_pages_per_site:
-                url, depth = queue.popleft()
-                normalized = normalize_url(url)
-                if normalized in seen_urls or depth > settings.max_depth_per_site:
-                    continue
-                seen_urls.add(normalized)
-
-                result = await fetch(client, normalized)
-                page = save_page_result(session, site, result, depth, epoch_id)
-                counts["pages_fetched"] += 1
-
-                if result.error_type:
-                    counts["errors"] += 1
-                    page_errors[result.error_type] += 1
-                    session.commit()
-                    continue
-
-                if not page_is_html(result):
-                    page.error_type = ErrorType.NON_HTML_CONTENT.value
-                    page_errors[ErrorType.NON_HTML_CONTENT.value] += 1
-                    counts["errors"] += 1
-                    session.commit()
-                    continue
-
-                try:
-                    parsed = parse_html(result.content or b"", normalized)
-                    page.title = parsed.title
-                    page.text_length = parsed.text_length
-                    page.word_count = parsed.word_count
-                    page.content_hash = parsed.content_hash
-                    for link in parsed.links:
-                        save_link(session, site, page, link.url, link.host, link.anchor_text, epoch_id)
-                        counts["links_found"] += 1
-                        if link.host == site.host and depth + 1 <= settings.max_depth_per_site:
-                            queue.append((link.url, depth + 1))
-                    session.commit()
-                except Exception as exc:
-                    error_type, error_message = classify_exception(exc)
-                    page.error_type = ErrorType.PARSER_ERROR.value
-                    page.error_message = f"{error_type}: {error_message}"
-                    page_errors[ErrorType.PARSER_ERROR.value] += 1
-                    counts["errors"] += 1
-                    session.commit()
-
-                if settings.crawl_delay_seconds > 0:
-                    await asyncio.sleep(settings.crawl_delay_seconds)
+            try:
+                await asyncio.wait_for(_crawl_pages(client), timeout=site_budget)
+            except (asyncio.TimeoutError, TimeoutError):
+                truncated = True
+                logger.warning("site %s: budget wait_for fired after %d pages",
+                               site.host, counts["pages_fetched"])
     except Exception as exc:
         # Transport-level blowup mid-crawl: classify and treat as site failure.
         error_type, error_message = classify_exception(exc)
@@ -271,6 +303,19 @@ async def _crawl_one_site_inner(
                      counts["pages_fetched"], counts["links_found"])
     else:
         _apply_crawl_failure(session, site, attempt, counts, page_errors)
+
+    if truncated:
+        # Budget exhaustion truncates the measurement; it does not establish
+        # that the site is unreachable. Recorded on the attempt (queryable
+        # for analysis) without disturbing the SUCCESS/FAILED outcome above.
+        attempt.error_type = ErrorType.SITE_BUDGET_EXHAUSTED.value
+        attempt.error_message = (
+            f"site budget ({site_budget:.0f}s) exhausted after "
+            f"{counts['pages_fetched']} pages; coverage truncated"
+        )
+        page_errors[ErrorType.SITE_BUDGET_EXHAUSTED.value] += 1
+        logger.info("crawl of %s truncated by site budget: %d pages, %d links",
+                    site.host, counts["pages_fetched"], counts["links_found"])
 
     session.commit()
     return counts
