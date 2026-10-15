@@ -1,8 +1,8 @@
 """Standalone netDb binary parsing for the VPS floodfill harvester.
 
-Vendored from ``xl_i2p/cross_layer.py::parse_routerinfo_bytes`` plus
-LeaseSet parsing; kept dependency-free (stdlib only) because the VPS sensor
-does NOT have the xl_i2p package installed. Do not import xl_i2p here.
+Vendored from ``xl_i2p/cross_layer.py::parse_routerinfo_bytes``; kept
+dependency-free (stdlib only) because the VPS sensor does NOT have the
+xl_i2p package installed. Do not import xl_i2p here.
 
 Byte-layout assumptions (documented for the dissertation appendix):
 - Router identity (classic 2048-bit ElGamal/DSA): 256-byte public key,
@@ -16,12 +16,6 @@ Byte-layout assumptions (documented for the dissertation appendix):
 - Router options (``router.version=``, ``caps=``) appear as ASCII ``k=v``
   pairs later in the blob; extracted with regexes on a best-effort basis.
   A ``caps`` value containing ``f``/``F`` marks a floodfill router.
-- LeaseSet files (``leaseSet-<i2p-b64>.dat``): the destination hash is
-  ground truth from the filename (it IS the SHA-256 of the destination in
-  I2P base64). Expiry is heuristic: the maximum 8-byte big-endian
-  millisecond timestamp found in the trailing 1 KiB that falls within
-  (now-2h, now+24h]; leases in I2P expire on the order of minutes, so a
-  timestamp far outside that window is not an expiry. May be None.
 
 The filename hash is always ground truth for identity; everything parsed
 from the binary is auxiliary metadata. All functions are defensive and
@@ -39,7 +33,6 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 ROUTERINFO_RE = re.compile(r"routerInfo-(.+)\.dat$")
-LEASESET_RE = re.compile(r"leaseSet-(.+)\.dat$")
 
 
 def decode_i2p_b64(value: str) -> bytes:
@@ -97,33 +90,6 @@ def parse_routerinfo(data: bytes) -> dict:
                     ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         logger.debug("routerInfo parse failed defensively", exc_info=True)
-    return info
-
-
-def parse_leaseset(data: bytes) -> dict:
-    """Best-effort parse of a LeaseSet blob. Never raises.
-
-    Returns the heuristic expiry (ISO UTC) or None. Lease entries end with
-    an 8-byte millisecond Date; we scan the trailing 1 KiB for the largest
-    plausible timestamp.
-    """
-    info: dict = {"lease_expiry": None}
-    try:
-        if not data or len(data) < 16:
-            return info
-        tail = data[-1024:]
-        best: int | None = None
-        now_ms = _now_ms()
-        lo, hi = now_ms - 2 * 3600 * 1000, now_ms + 24 * 3600 * 1000
-        for offset in range(0, len(tail) - 7):
-            ts_ms = struct.unpack(">Q", tail[offset:offset + 8])[0]
-            if lo <= ts_ms <= hi and (best is None or ts_ms > best):
-                best = ts_ms
-        if best is not None:
-            info["lease_expiry"] = datetime.fromtimestamp(
-                best / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except Exception:
-        logger.debug("leaseSet parse failed defensively", exc_info=True)
     return info
 
 

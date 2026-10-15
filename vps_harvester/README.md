@@ -2,7 +2,7 @@
 
 Standalone network-layer sensor. A cheap cloud VPS with a **public IP** runs
 Java I2P as a floodfill router; this harvester periodically scans the
-router's `netDb/` directory (router infos + leaseSets), writes JSONL batches,
+router's `netDb/` directory (router infos), writes JSONL batches,
 ships them to the Study 2 MariaDB host (VM2) over rsync/SSH, where
 `ingest/ingest_netdb.py` loads them into `network_observations`.
 
@@ -267,6 +267,6 @@ overlapping files are safe.
 cd vps_harvester && python3 -m pytest tests/ -q
 ```
 11 tests, stdlib only (no pymysql needed — the DB layer is faked).
-Covers: routerInfo/leaseSet parsing incl. truncated files, incremental
+Covers: routerInfo parsing incl. truncated files, incremental
 cursor behavior, ship cursor with faked rsync, ingest idempotency and
 epoch tagging.

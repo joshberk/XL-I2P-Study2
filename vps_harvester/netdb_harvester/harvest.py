@@ -6,12 +6,17 @@ the harvester is safe to run on a timer. Each batch is one JSONL file in
 SPOOL_DIR; ship.py moves batches to VM2.
 
 Record schema (one JSON object per line):
-  kind: "routerinfo" | "leaseset"
+  kind: "routerinfo"
   sensor_id, observed_at (UTC ISO), file (relative path), file_mtime,
-  router_hash | dest_hash (+ dest_b32 for leaseSets),
+  router_hash,
   version / caps / floodfill / published_at (routerinfo, best-effort),
-  lease_expiry (leaseset, heuristic),
   size_bytes
+
+Note: the harvester scans routerInfo files only. The Java router never
+persists LeaseSets to disk (verified live 2026-10-15: 0 leaseSet-*.dat vs
+3060 routerInfo-*.dat on the floodfill), so a lease-set scan would always
+come back empty. Isolated-eepsite discovery from leaseSets is a known
+limitation, not an implemented feed.
 
 Env: NETDB_DIR (default ~/.i2p/netDb), SPOOL_DIR (default ./spool),
 SENSOR_ID (default hostname).
@@ -26,10 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .parse import (
-    LEASESET_RE,
     ROUTERINFO_RE,
-    i2p_b64_to_b32_host,
-    parse_leaseset,
     parse_routerinfo,
 )
 
@@ -58,17 +60,12 @@ def save_cursor(spool_dir: Path, cursor: dict) -> None:
 
 
 def iter_changed_files(netdb_dir: Path, cursor: dict):
-    """Yield (kind, path, rel, mtime_ns) for new/changed routerInfo/leaseSet files."""
+    """Yield (kind, path, rel, mtime_ns) for new/changed routerInfo files."""
     for fp in sorted(netdb_dir.rglob("routerInfo-*.dat")):
         match = ROUTERINFO_RE.match(fp.name)
         if not match:
             continue
         yield from _check(fp, netdb_dir, cursor, "routerinfo", match.group(1))
-    for fp in sorted(netdb_dir.rglob("leaseSet-*.dat")):
-        match = LEASESET_RE.match(fp.name)
-        if not match:
-            continue
-        yield from _check(fp, netdb_dir, cursor, "leaseset", match.group(1))
 
 
 def _check(fp: Path, netdb_dir: Path, cursor: dict, kind: str, file_hash: str):
@@ -99,10 +96,6 @@ def build_record(kind: str, fp: Path, rel: str, mtime_ns: int, file_hash: str,
     if kind == "routerinfo":
         record["router_hash"] = file_hash
         record.update(parse_routerinfo(data))
-    else:
-        record["dest_hash"] = file_hash
-        record["dest_b32"] = i2p_b64_to_b32_host(file_hash)
-        record.update(parse_leaseset(data))
     return record
 
 

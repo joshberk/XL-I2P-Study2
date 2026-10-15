@@ -338,6 +338,16 @@ routers that publish to it, not the whole DHT — prior I2P census work used
 many floodfills). Analysis must filter on `source_type`; the two are never
 interchangeable.
 
+**Known limitation — no lease-set discovery feed.** An earlier design
+admitted previously unseen `.b32.i2p` destinations from a lease-set harvest
+of the floodfill's netDb, to close the link-only discovery blind spot:
+isolated eepsites never appear in outlinks. That feed was removed
+2026-10-15 — a live check of the VPS router's netDb store found 0
+`leaseSet-*.dat` files vs 3060 `routerInfo-*.dat`: the Java router never
+persists LeaseSets to disk, so the harvester could never see them. Isolated
+eepsites therefore remain a coverage blind spot; the dissertation's coverage
+claims must disclose it.
+
 The old floodfill-gated `harvest_netdb()` (`FLOODFILL_MODE`) remains for a
 future floodfill-capable vantage host and stays disabled here.
 

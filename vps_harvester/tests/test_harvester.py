@@ -4,8 +4,6 @@ Byte-layout assumptions under test (see netdb_harvester/parse.py):
 - routerInfo: 256-byte pubkey + 128-byte signkey + 1-byte cert type +
   2-byte big-endian cert length (=387+cert_len identity), then an 8-byte
   big-endian millisecond published timestamp, then ASCII k=v options.
-- leaseSet: destination hash is ground truth from the filename; expiry is
-  the max plausible 8-byte ms timestamp in the trailing 1 KiB.
 Fixtures below are constructed to those assumptions.
 """
 from __future__ import annotations
@@ -28,7 +26,6 @@ from netdb_harvester import ship as ship_mod
 from netdb_harvester.harvest import harvest_once
 from netdb_harvester.parse import (
     i2p_b64_to_b32_host,
-    parse_leaseset,
     parse_routerinfo,
 )
 from netdb_harvester.ship import ship_once
@@ -49,13 +46,6 @@ def make_routerinfo(version="2.13.0", caps="LRF", published_ms=None) -> bytes:
     blob += struct.pack(">Q", ts)
     blob += f"junkrouter.version={version} padding caps={caps} tail".encode()
     return blob
-
-
-def make_leaseset(expiry_ms=None) -> bytes:
-    data = bytearray(b"\x00" * 1500)
-    ts = expiry_ms if expiry_ms is not None else _now_ms() + 5 * 60_1000
-    struct.pack_into(">Q", data, len(data) - 100, ts)
-    return bytes(data)
 
 
 def test_parse_routerinfo_extracts_metadata():
@@ -92,15 +82,6 @@ def test_parse_routerinfo_truncated_never_raises():
         assert set(info) == {"version", "caps", "floodfill", "published_at"}
 
 
-def test_parse_leaseset_expiry_heuristic():
-    ts = _now_ms() + 5 * 60_1000
-    info = parse_leaseset(make_leaseset(expiry_ms=ts))
-    assert info["lease_expiry"] is not None
-    # garbage never crashes, and implausible timestamps are rejected
-    assert parse_leaseset(b"\x00" * 1500)["lease_expiry"] is None
-    assert parse_leaseset(b"")["lease_expiry"] is None
-
-
 def test_b64_to_b32_host_roundtrip():
     raw = os.urandom(32)
     host = i2p_b64_to_b32_host(_b64(raw))
@@ -112,29 +93,25 @@ def test_b64_to_b32_host_roundtrip():
 def netdb_dir(tmp_path):
     d = tmp_path / "netDb"
     (d / "r1").mkdir(parents=True)
-    (d / "l2").mkdir(parents=True)
     (d / "r1" / f"routerInfo-{_b64(b'a' * 32)}.dat").write_bytes(make_routerinfo())
     (d / "r1" / f"routerInfo-{_b64(b'b' * 32)}.dat").write_bytes(
         make_routerinfo(version="2.12.0", caps="LR"))
-    (d / "l2" / f"leaseSet-{_b64(b'c' * 32)}.dat").write_bytes(make_leaseset())
     return d
 
 
 def test_harvest_incremental_cursor(tmp_path, netdb_dir):
     spool = tmp_path / "spool"
     first = harvest_once(netdb_dir, spool, "sensor-1")
-    assert first == {"scanned": 3, "new": 3, "batches": 1, "errors": 0}
+    assert first == {"scanned": 2, "new": 2, "batches": 1, "errors": 0}
     batches = list(spool.glob("batch-*.jsonl"))
     assert len(batches) == 1
     records = [json.loads(line) for line in batches[0].read_text().splitlines()]
-    assert len(records) == 3
+    assert len(records) == 2
     kinds = sorted(r["kind"] for r in records)
-    assert kinds == ["leaseset", "routerinfo", "routerinfo"]
+    assert kinds == ["routerinfo", "routerinfo"]
     assert all(r["sensor_id"] == "sensor-1" for r in records)
     ri = next(r for r in records if r["kind"] == "routerinfo")
     assert ri["version"] in {"2.13.0", "2.12.0"}
-    ls = next(r for r in records if r["kind"] == "leaseset")
-    assert ls["dest_b32"].endswith(".b32.i2p")
 
     # Second run: nothing new.
     second = harvest_once(netdb_dir, spool, "sensor-1")
@@ -246,9 +223,6 @@ def _record(kind="routerinfo", sensor_id="vps-floodfill-01", **kw):
             "file_mtime": 1.0, "size_bytes": 10}
     if kind == "routerinfo":
         base["router_hash"] = kw.pop("router_hash", _b64(b"r" * 32))
-    else:
-        base["dest_hash"] = kw.pop("dest_hash", _b64(b"d" * 32))
-        base["dest_b32"] = kw.pop("dest_b32", "a" * 52 + ".b32.i2p")
     base.update(kw)
     return base
 
@@ -257,7 +231,9 @@ def test_ingest_inserts_and_dedupes(tmp_path):
     spool = tmp_path / "ispool"
     spool.mkdir()
     _write_batch(spool, "batch-1.jsonl",
-                 [_record("routerinfo"), _record("leaseset"), {"kind": "bogus"}])
+                 [_record("routerinfo"),
+                  _record("routerinfo", router_hash=_b64(b"s" * 32)),
+                  {"kind": "bogus"}])
     db = FakeDB(epoch_id=7)
     first = ingest_once(spool, db)
     assert first["inserted"] == 2 and first["invalid"] == 1

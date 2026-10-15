@@ -13,8 +13,6 @@ Never mix them: analysis must filter on source_type.
 
 Row mapping:
 - routerinfo records -> router_hash set, host NULL.
-- leaseset records   -> host = dest_b32 (falls back to raw dest_hash),
-                        router_hash NULL.
 - epoch_id = current OPEN epoch, or NULL if none is open (never fails).
 - source_detail = "sensor=<sensor_id> batch=<batch> kind=<kind>" — the
   sensor prefix doubles as the idempotency scope.
@@ -101,23 +99,19 @@ def record_identity(record: dict) -> tuple[str | None, str | None]:
     """Return (router_hash, host) for a validated record."""
     if record.get("kind") == "routerinfo":
         return record.get("router_hash"), None
-    dest_b32 = record.get("dest_b32")
-    return None, dest_b32 or record.get("dest_hash")
+    return None, None
 
 
 def validate_record(record: dict) -> str | None:
     """Return an error string, or None if the record is usable."""
     if not isinstance(record, dict):
         return "not a JSON object"
-    if record.get("kind") not in {"routerinfo", "leaseset"}:
+    if record.get("kind") != "routerinfo":
         return "bad kind"
     if not record.get("sensor_id"):
         return "missing sensor_id"
-    if record.get("kind") == "routerinfo" and not record.get("router_hash"):
+    if not record.get("router_hash"):
         return "routerinfo missing router_hash"
-    if record.get("kind") == "leaseset" and not (
-            record.get("dest_hash") or record.get("dest_b32")):
-        return "leaseset missing dest_hash"
     return None
 
 
