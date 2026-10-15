@@ -14,18 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 
 import httpx
 from sqlalchemy import and_, not_, or_, select
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .httpfetch import fetch_bounded
 from .models import CrawlAttempt, Epoch, Site, now
 from .proxy import tcp_proxy_available
 from .retry import exhausted, schedule_retry
 from .states import AttemptStatus, AttemptType, ErrorType, SiteState
-from .taxonomy import classify_exception, classify_http_status
+from .taxonomy import classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -143,17 +143,12 @@ def select_sites_for_verification(
 async def verify_url(
     client: httpx.AsyncClient, base_url: str
 ) -> tuple[bool, int | None, str | None, str | None, int | None]:
-    started = time.perf_counter()
-    try:
-        response = await client.get(base_url, headers={"User-Agent": settings.user_agent})
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        error_type, error_message = classify_http_status(response.status_code, response.content)
-        if error_type is None:
-            return True, response.status_code, None, None, elapsed_ms
-        return False, response.status_code, error_type, error_message, elapsed_ms
-    except Exception as exc:
-        error_type, error_message = classify_exception(exc)
-        return False, None, error_type, error_message, None
+    # Bounded fetch: a "cheap" liveness probe must not buffer an enormous
+    # landing page either (same wedge as the crawl phase, smaller scale).
+    result = await fetch_bounded(client, base_url)
+    if result.error_type is None:
+        return True, result.status_code, None, None, result.elapsed_ms
+    return False, result.status_code, result.error_type, result.error_message, result.elapsed_ms
 
 
 def _apply_verify_failure(session: Session, site: Site, attempt: CrawlAttempt,

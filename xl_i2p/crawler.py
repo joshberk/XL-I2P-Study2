@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections import Counter, deque
-from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
@@ -26,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .httpfetch import FetchResult, fetch_bounded
 from .models import CrawlAttempt, Epoch, Link, Page, Site, now
 from .parser import parse_html
 from .proxy import tcp_proxy_available
@@ -36,17 +35,6 @@ from .taxonomy import classify_exception, classify_http_status
 from .utils import host_from_url, normalize_url, site_type_for_host
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class FetchResult:
-    url: str
-    status_code: int | None
-    content_type: str | None
-    content: bytes | None
-    elapsed_ms: int | None
-    error_type: str | None
-    error_message: str | None
 
 
 def select_sites_for_crawling(
@@ -89,21 +77,8 @@ def select_sites_for_crawling(
 
 
 async def fetch(client: httpx.AsyncClient, url: str) -> FetchResult:
-    started = time.perf_counter()
-    try:
-        response = await client.get(url, headers={"User-Agent": settings.user_agent})
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        content_type = response.headers.get("content-type")
-        content = response.content
-        if len(content) > settings.max_content_bytes:
-            return FetchResult(url, response.status_code, content_type, None, elapsed_ms,
-                               ErrorType.CONTENT_TOO_LARGE.value, "content exceeded limit")
-        error_type, error_message = classify_http_status(response.status_code, content)
-        return FetchResult(url, response.status_code, content_type, content, elapsed_ms,
-                           error_type, error_message)
-    except Exception as exc:
-        error_type, error_message = classify_exception(exc)
-        return FetchResult(url, None, None, None, None, error_type, error_message)
+    """Fetch one URL, never buffering more than ``max_content_bytes``."""
+    return await fetch_bounded(client, url)
 
 
 def page_is_html(result: FetchResult) -> bool:

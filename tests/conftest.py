@@ -27,14 +27,31 @@ def db_session(monkeypatch):
 
 
 class FakeResponse:
-    def __init__(self, url: str, html: bytes, status_code: int = 200):
+    def __init__(self, url: str, html: bytes, status_code: int = 200, headers: dict | None = None):
         self.url = url
         self.status_code = status_code
         self.headers = {"content-type": "text/html"}
+        if headers:
+            self.headers.update(headers)
         self.content = html
 
 
-def make_fake_client(html: bytes, status_code: int = 200):
+class FakeStreamResponse(FakeResponse):
+    """Async-CM wrapper so the fake client supports client.stream()."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def aiter_bytes(self, chunk_size: int | None = None):
+        step = chunk_size or 1024
+        for i in range(0, len(self.content), step):
+            yield self.content[i : i + step]
+
+
+def make_fake_client(html: bytes, status_code: int = 200, response_headers: dict | None = None):
     class FakeClient:
         def __init__(self, *args, **kwargs):
             pass
@@ -47,6 +64,10 @@ def make_fake_client(html: bytes, status_code: int = 200):
 
         async def get(self, url, headers=None):
             return FakeResponse(url, html, status_code)
+
+        def stream(self, method, url, headers=None):
+            # httpx's client.stream() is sync and returns an async CM.
+            return FakeStreamResponse(url, html, status_code, headers=response_headers)
 
     return FakeClient
 
