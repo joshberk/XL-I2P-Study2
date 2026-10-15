@@ -66,6 +66,26 @@ def test_parse_routerinfo_extracts_metadata():
     assert info["published_at"] is not None
 
 
+def test_parse_routerinfo_length_prefixed_options():
+    # Real I2P option encoding: length-prefixed key/value pairs, e.g.
+    # b"\x04caps=\x03XfR;". The old parser returned None for all of these.
+    blob = b"\x01" * 256 + b"\x02" * 128 + b"\x00" + struct.pack(">H", 0)
+    assert len(blob) == 387
+    blob += struct.pack(">Q", _now_ms() - 3600_000)
+    blob += b"junk"
+    blob += bytes([len("router.version")]) + b"router.version="
+    blob += bytes([len("2.13.0")]) + b"2.13.0"
+    blob += b";padding"
+    blob += bytes([len("caps")]) + b"caps="
+    blob += bytes([len("XfR")]) + b"XfR"
+    blob += b";tail"
+    info = parse_routerinfo(blob)
+    assert info["version"] == "2.13.0"
+    assert info["caps"] == "XfR"
+    assert info["floodfill"] is True
+    assert info["published_at"] is not None
+
+
 def test_parse_routerinfo_truncated_never_raises():
     for blob in (b"", b"\x00" * 10, os.urandom(2000)):
         info = parse_routerinfo(blob)

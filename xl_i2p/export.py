@@ -10,6 +10,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from .models import (
     SeedEvent,
     Site,
 )
+from .states import AttemptStatus, AttemptType
 
 logger = logging.getLogger(__name__)
 
@@ -85,15 +87,21 @@ def _export_sql_dump(out_path: Path) -> bool:
         return False
     cmd = [
         "mysqldump",
-        "--single-transaction", "--skip-lock-tables", "--routines", "--events",
+        # NOTE: no --routines/--events: they need privileges the crawler DB
+        # user does not have, and a single flag error fails the whole dump.
+        # The schema has no routines/events; tables are what we preserve.
+        "--single-transaction", "--skip-lock-tables",
         f"--host={parsed.hostname}", f"--port={parsed.port or 3306}",
-        f"--user={parsed.username}", f"--password={parsed.password}",
+        f"--user={parsed.username}",
         parsed.path.lstrip("/"),
     ]
+    # Password via MYSQL_PWD, never --password= on the command line (which
+    # is visible to other users via ps).
+    env = dict(os.environ, MYSQL_PWD=parsed.password or "")
     try:
         with out_path.open("wb") as f:
             subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE,
-                           timeout=6 * 3600, check=True)
+                           timeout=6 * 3600, check=True, env=env)
         logger.info("wrote SQL dump to %s", out_path)
         return True
     except Exception as exc:
@@ -171,17 +179,31 @@ def export_graph_csv(
     edges_path: str | Path,
     epoch_id: int | None = None,
 ) -> tuple[int, int]:
-    """Induced graph: CRAWLED sites and inter-site edges, optionally per epoch."""
+    """Induced graph: crawled sites and inter-site edges, optionally per epoch.
+
+    Nodes are derived from successful CRAWL attempts, not from the mutable
+    ``Site.state`` column: since the cohort-reservation change, CRAWLED
+    sites are continuously re-verified and flip back to REACHABLE, so a
+    state-based node set shrinks as the epoch goes on and depends on when
+    the export runs. Attempts are immutable, so the graph is reproducible.
+    """
     nodes_path = Path(nodes_path)
     edges_path = Path(edges_path)
 
     sites = list(session.scalars(select(Site).order_by(Site.id)))
+    attempt_stmt = select(CrawlAttempt.site_id).where(
+        CrawlAttempt.attempt_type == AttemptType.CRAWL.value,
+        CrawlAttempt.status == AttemptStatus.SUCCESS.value,
+    )
+    if epoch_id is not None:
+        attempt_stmt = attempt_stmt.where(CrawlAttempt.epoch_id == epoch_id)
+    crawled_ids = set(session.scalars(attempt_stmt))
+
     link_stmt = select(Link).order_by(Link.id)
     if epoch_id is not None:
         link_stmt = link_stmt.where(Link.epoch_id == epoch_id)
     links = list(session.scalars(link_stmt))
 
-    crawled_ids = {s.id for s in sites if s.state == "CRAWLED"}
     with nodes_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,

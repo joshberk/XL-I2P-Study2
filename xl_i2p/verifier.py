@@ -40,6 +40,9 @@ VERIFY_STATES = [
 # Longitudinal cohort: known sites whose survival the study must track.
 # These get a reserved share of every verify batch (oldest-checked first) so
 # re-verification is never starved by the never-checked discovery backlog.
+# Cohort membership is states AND success_count > 0: a RETRY_READY row for a
+# host that never answered once is discovery backlog, not a known site, and
+# must not consume cohort slots.
 COHORT_STATES = [
     SiteState.REACHABLE.value,
     SiteState.CRAWLED.value,
@@ -86,11 +89,13 @@ def select_sites_for_verification(
 
     Split-budget selection: ``settings.verify_cohort_share`` of the batch is
     reserved for re-verifying the longitudinal cohort (REACHABLE / CRAWLED /
-    RETRY_READY, oldest-checked first); the remainder sweeps the discovery
-    backlog (never-checked first, then oldest). Without the reservation, the
-    never-checked backlog (tens of thousands of seeds plus the daily
-    lease-set feed) starves cohort re-verification, and the churn/survival
-    signal on known sites goes quiet.
+    RETRY_READY with success_count > 0, oldest-checked first); the remainder
+    sweeps the discovery backlog (never-checked first, then oldest). Without
+    the reservation, the never-checked backlog (tens of thousands of seeds
+    plus the daily lease-set feed) starves cohort re-verification, and the
+    churn/survival signal on known sites goes quiet. The success_count gate
+    keeps never-reached RETRY_READY rows (failed once, never answered) in
+    the discovery pool instead of consuming cohort slots.
 
     Unused budget in either pool flows to the other, so the full ``limit`` is
     used whenever eligible sites exist. Backoff (``next_retry_at``) and the
@@ -113,10 +118,14 @@ def select_sites_for_verification(
         Site.id.asc(),
     )
 
+    # Cohort = known sites only: a RETRY_READY row for a host that never
+    # answered once is discovery backlog, not cohort.
+    is_cohort = and_(Site.state.in_(COHORT_STATES), Site.success_count > 0)
+
     cohort_stmt = (
         select(Site)
         .where(
-            Site.state.in_(COHORT_STATES),
+            is_cohort,
             retry_due,
             eligible,
         )
@@ -129,7 +138,7 @@ def select_sites_for_verification(
         select(Site)
         .where(
             Site.state.in_(VERIFY_STATES),
-            not_(Site.state.in_(COHORT_STATES)),
+            not_(is_cohort),
             retry_due,
             eligible,
         )
@@ -197,6 +206,9 @@ async def _verify_one_site_inner(
     if ok:
         site.state = SiteState.REACHABLE.value
         site.success_count += 1
+        # failure_count is consecutive: a success clears the streak, so the
+        # retry-exhaustion limit (retry.py) measures consecutive failures.
+        site.failure_count = 0
         site.last_seen_at = now()
         site.last_checked_at = now()
         site.last_error_type = None

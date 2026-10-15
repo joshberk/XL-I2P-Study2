@@ -110,6 +110,57 @@ def test_pass_survives_per_site_lookup_error(db_session, stubbed_xlayer):
                    .where(CrossLayerObservation.host == "good.i2p")) == 1
 
 
+def _b32_result_for(named_host: str) -> CrossLayerResult:
+    # Real-world shape: lookup_candidate resolves a named host to its b32
+    # and returns the b32 as result.host (see lookup_candidate line 317).
+    b32 = "b" * 52 + ".b32.i2p"
+    return CrossLayerResult(
+        input_value=named_host, host=b32, canonical_b32=b32,
+        lookup_method="sam_naming_lookup", leaseset_found=True,
+        leaseset_hash="deadbeef", confidence="validated_by_leaseset",
+    )
+
+
+def test_persist_anchors_to_input_site_not_b32(db_session):
+    # Regression: the old code upserted on result.host (the b32), creating a
+    # duplicate b32 Site row and attaching the observation to it, so the
+    # named site was re-selected by the association pass every cycle.
+    from xl_i2p.cross_layer import persist_cross_layer_result
+    s = db_session
+    epoch = open_epoch(s, "e1")
+    named = _seed(s, "stats.i2p", state=SiteState.CRAWLED.value)
+    assert persist_cross_layer_result(s, _b32_result_for("stats.i2p"), epoch_id=epoch.id) is True
+    s.commit()
+
+    # No duplicate b32 row.
+    assert s.scalar(select(func.count()).select_from(Site)) == 1
+    # Observation is anchored to the named site...
+    obs = s.scalar(select(CrossLayerObservation).where(
+        CrossLayerObservation.epoch_id == epoch.id))
+    assert obs.site_id == named.id
+    assert obs.host == "stats.i2p"
+    assert obs.canonical_b32 == "b" * 52 + ".b32.i2p"
+    # ...so the pass will not reselect it next cycle (no ORDER BY id stall).
+    assert sites_needing_association(s, epoch.id, 10) == []
+    # ...and the named site was not demoted from CRAWLED.
+    s.refresh(named)
+    assert named.state == SiteState.CRAWLED.value
+    assert named.is_cross_layer is True
+
+
+def test_persist_never_demotes_pipeline_states(db_session):
+    from xl_i2p.cross_layer import persist_cross_layer_result
+    s = db_session
+    epoch = open_epoch(s, "e1")
+    for state in (SiteState.REACHABLE.value, SiteState.CRAWLED.value,
+                  SiteState.VERIFYING.value):
+        host = f"{state.lower()}.i2p"
+        site = _seed(s, host, state=state)
+        persist_cross_layer_result(s, _b32_result_for(host), epoch_id=epoch.id)
+        s.refresh(site)
+        assert site.state == state, host
+
+
 # ---------------------------------------------------------------------------
 # Local netDb census
 # ---------------------------------------------------------------------------
@@ -148,6 +199,34 @@ def test_parse_routerinfo_bytes_valid():
     assert info["caps"] == "LRF"
     assert info["floodfill"] is True
     assert info["published_at"] is not None
+
+
+def _routerinfo_bytes_length_prefixed(version="2.13.0", caps="XfR"):
+    # Real I2P option encoding: length-prefixed key/value pairs, e.g.
+    # b"\x04caps=\x03XfR;". The old parser returned None for all of these.
+    blob = b"\x01" * 256 + b"\x02" * 128 + b"\x00" + struct.pack(">H", 0)
+    assert len(blob) == 387
+    ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+    blob += struct.pack(">Q", ts)
+    blob += b"junk"
+    blob += bytes([len("router.version")]) + b"router.version="
+    blob += bytes([len(version)]) + version.encode()
+    blob += b";padding"
+    blob += bytes([len("caps")]) + b"caps="
+    blob += bytes([len(caps)]) + caps.encode()
+    blob += b";tail"
+    return blob
+
+
+def test_parse_routerinfo_bytes_length_prefixed_options():
+    info = parse_routerinfo_bytes(_routerinfo_bytes_length_prefixed())
+    assert info["version"] == "2.13.0"
+    assert info["caps"] == "XfR"
+    assert info["floodfill"] is True
+    assert info["published_at"] is not None
+    info = parse_routerinfo_bytes(_routerinfo_bytes_length_prefixed(caps="LR"))
+    assert info["caps"] == "LR"
+    assert info["floodfill"] is False
 
 
 def test_parse_routerinfo_bytes_malformed_never_raises():

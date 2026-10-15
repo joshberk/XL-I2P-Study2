@@ -46,7 +46,8 @@ def epoch(db_session):
     return e
 
 
-def _site(db_session, host, state, checked_days_ago=None, next_retry_at=None):
+def _site(db_session, host, state, checked_days_ago=None, next_retry_at=None,
+         successes=0):
     s = Site(
         host=host,
         base_url=f"http://{host}/",
@@ -57,6 +58,7 @@ def _site(db_session, host, state, checked_days_ago=None, next_retry_at=None):
             else None
         ),
         next_retry_at=next_retry_at,
+        success_count=successes,
     )
     db_session.add(s)
     db_session.flush()
@@ -71,10 +73,10 @@ def test_cohort_gets_reserved_share_despite_backlog(db_session, epoch, monkeypat
     """200 never-checked NEW sites must not starve the 20 known cohort sites."""
     _share(monkeypatch, 0.5)
     cohort = [
-        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
+        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
         for i in range(10)
     ] + [
-        _site(db_session, f"reach-{i}.i2p", SiteState.REACHABLE.value, checked_days_ago=20)
+        _site(db_session, f"reach-{i}.i2p", SiteState.REACHABLE.value, checked_days_ago=20, successes=1)
         for i in range(10)
     ]
     backlog = [
@@ -99,7 +101,7 @@ def test_cohort_gets_reserved_share_despite_backlog(db_session, epoch, monkeypat
 def test_unused_cohort_budget_flows_to_discovery(db_session, epoch, monkeypatch):
     _share(monkeypatch, 0.5)
     cohort = [
-        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
+        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
         for i in range(2)
     ]
     backlog = [_site(db_session, f"new-{i}.i2p", SiteState.NEW.value) for i in range(100)]
@@ -115,7 +117,7 @@ def test_cohort_capped_at_share_when_discovery_empty(db_session, epoch, monkeypa
     """Cohort never takes more than its share in one batch, even unopposed."""
     _share(monkeypatch, 0.5)
     cohort = [
-        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
+        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
         for i in range(100)
     ]
 
@@ -128,7 +130,7 @@ def test_cohort_capped_at_share_when_discovery_empty(db_session, epoch, monkeypa
 def test_share_zero_is_discovery_only(db_session, epoch, monkeypatch):
     _share(monkeypatch, 0.0)
     cohort = [
-        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
+        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
         for i in range(10)
     ]
     backlog = [_site(db_session, f"new-{i}.i2p", SiteState.NEW.value) for i in range(20)]
@@ -145,7 +147,7 @@ def test_share_one_prefers_cohort_with_slack_to_discovery(
 ):
     _share(monkeypatch, 1.0)
     cohort = [
-        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
+        _site(db_session, f"crawled-{i}.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
         for i in range(10)
     ]
     backlog = [_site(db_session, f"new-{i}.i2p", SiteState.NEW.value) for i in range(20)]
@@ -159,9 +161,9 @@ def test_share_one_prefers_cohort_with_slack_to_discovery(
 
 def test_cohort_order_oldest_first(db_session, epoch, monkeypatch):
     _share(monkeypatch, 1.0)
-    oldest = _site(db_session, "old.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
-    mid = _site(db_session, "mid.i2p", SiteState.RETRY_READY.value, checked_days_ago=20)
-    newest = _site(db_session, "new.i2p", SiteState.REACHABLE.value, checked_days_ago=10)
+    oldest = _site(db_session, "old.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
+    mid = _site(db_session, "mid.i2p", SiteState.RETRY_READY.value, checked_days_ago=20, successes=1)
+    newest = _site(db_session, "new.i2p", SiteState.REACHABLE.value, checked_days_ago=10, successes=1)
 
     select_sites_for_verification(db_session, 2, epoch)
 
@@ -176,8 +178,9 @@ def test_backoff_still_respected_in_cohort(db_session, epoch, monkeypatch):
         SiteState.CRAWLED.value,
         checked_days_ago=30,
         next_retry_at=_now() + timedelta(hours=1),
+        successes=1,
     )
-    due = _site(db_session, "due.i2p", SiteState.CRAWLED.value, checked_days_ago=30)
+    due = _site(db_session, "due.i2p", SiteState.CRAWLED.value, checked_days_ago=30, successes=1)
 
     select_sites_for_verification(db_session, 10, epoch)
 
@@ -207,3 +210,25 @@ def test_cohort_states_constant_matches_intent():
         SiteState.CRAWLED.value,
         SiteState.RETRY_READY.value,
     }
+
+
+def test_retry_ready_never_reached_is_discovery_not_cohort(
+    db_session, epoch, monkeypatch
+):
+    """A RETRY_READY row for a host that never answered once (success_count=0)
+    is discovery backlog and must not consume a cohort slot."""
+    _share(monkeypatch, 0.5)
+    known = _site(db_session, "known.i2p", SiteState.CRAWLED.value,
+                  checked_days_ago=20, successes=1)
+    never_reached = _site(db_session, "flaky.i2p", SiteState.RETRY_READY.value,
+                          checked_days_ago=30)  # successes=0
+    fresh = _site(db_session, "fresh.i2p", SiteState.NEW.value)
+
+    jobs = select_sites_for_verification(db_session, 2, epoch)
+
+    # Cohort's single slot goes to the known site; the never-reached row
+    # competes in the discovery pool (never-checked first -> fresh.i2p).
+    assert len(jobs) == 2
+    assert _claimed(known)
+    assert _claimed(fresh)
+    assert not _claimed(never_reached)

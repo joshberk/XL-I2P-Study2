@@ -13,10 +13,12 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
 
 import xl_i2p.epochs as epochs_mod
 from xl_i2p.config import Settings
 from xl_i2p.epochs import (
+    EpochError,
     _next_label,
     close_epoch,
     get_open_epoch,
@@ -68,6 +70,43 @@ def test_rollover_due_closes_and_opens(db_session, auto_settings):
     assert closed.status == EpochStatus.CLOSED.value
     assert closed.ended_at is not None
     assert get_open_epoch(s).id == result.id
+
+
+def test_open_epoch_resets_failure_count(db_session):
+    # failure_count measures *consecutive* failures: the epoch cohort reset
+    # must clear the streak so "terminal for the epoch" is really per-epoch.
+    from xl_i2p.models import Site
+    from xl_i2p.seeds import upsert_site
+    s = db_session
+    site = upsert_site(s, "flaky.i2p", source="test")
+    site.failure_count = 7
+    s.commit()
+    open_epoch(s, "e1")
+    s.expire_all()
+    assert s.scalar(select(Site.failure_count).where(Site.host == "flaky.i2p")) == 0
+
+
+def test_rollover_is_atomic_when_open_fails(db_session, auto_settings, monkeypatch):
+    # If the open half of a rollover fails, the close half must roll back:
+    # the old two-commit sequence could leave NO open epoch, stalling the
+    # crawler forever.
+    s = db_session
+    old = open_epoch(s, "e1")
+    _backdate(s, old, 40)
+
+    def boom(*a, **k):
+        raise EpochError("simulated open failure")
+
+    monkeypatch.setattr(epochs_mod, "open_epoch", boom)
+    result = rollover_if_due(s)
+    s.expire_all()
+    assert result.label == "e1"
+    assert result.id == old.id
+    open_count = s.scalar(
+        select(func.count()).select_from(Epoch)
+        .where(Epoch.status == EpochStatus.OPEN.value))
+    assert open_count == 1
+    assert get_open_epoch(s).id == old.id
 
 
 def test_rollover_disabled_is_noop(db_session, monkeypatch):

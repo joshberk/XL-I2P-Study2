@@ -13,21 +13,31 @@ import httpx
 from .states import ErrorType
 
 
-# Marker emitted by the I2P HTTP proxy (i2ptunnel) on its generated error
-# pages, e.g. "503 Service Unavailable" with "<H1>I2P ERROR: DESTINATION NOT
-# FOUND</H1>" when the requested .i2p destination has no published lease set
-# or cannot be reached through tunnels. Verified against the
-# I2PTunnelHTTPClientBase source (ERR_DESTINATION_UNKNOWN fallback page).
-# An origin eepsite's own 5xx page will not carry this marker, which is what
-# lets us separate proxy-reported destination failure from server failure.
-_I2P_PROXY_ERROR_MARKER = b"i2p error:"
+# Markers emitted by the I2P HTTP proxy (i2ptunnel) on its generated error
+# pages, which report an unreachable destination rather than an origin
+# server failure.
+#
+# Two signals are checked because the proxy's error pages changed across
+# router versions:
+# - b"i2p error:": the hard-coded ERR_DESTINATION_UNKNOWN fallback page in
+#   I2PTunnelHTTPClientBase (e.g. "<H1>I2P ERROR: DESTINATION NOT
+#   FOUND</H1>").
+# - b"proxy.i2p/": every template-based error page since I2P 0.9.49 links
+#   its stylesheet/scripts as http://proxy.i2p/themes/console/... This
+#   marker is language-independent (the page titles like "Website
+#   Unreachable" / "Domain Not Found" / "Destination Not Found" are
+#   localized) and an origin eepsite has no reason to reference the
+#   router's internal proxy.i2p address, so a 4xx/5xx carrying it is
+#   the proxy talking, not the site.
+_I2P_PROXY_ERROR_MARKERS = (b"i2p error:", b"proxy.i2p/")
 _PROXY_BODY_SCAN_LIMIT = 8192
 
 
 def _looks_like_i2p_proxy_error(body: bytes | None) -> bool:
     if not body:
         return False
-    return _I2P_PROXY_ERROR_MARKER in bytes(body[:_PROXY_BODY_SCAN_LIMIT]).lower()
+    lowered = bytes(body[:_PROXY_BODY_SCAN_LIMIT]).lower()
+    return any(marker in lowered for marker in _I2P_PROXY_ERROR_MARKERS)
 
 
 def classify_http_status(
@@ -35,22 +45,22 @@ def classify_http_status(
 ) -> tuple[str | None, str | None]:
     """Return (error_type, message) for an HTTP response; (None, None) if OK-ish.
 
-    ``body`` is the (bounded) response body; when a 5xx carries the I2P
-    proxy's error marker it is classified as I2P_DEST_NOT_FOUND (the proxy
-    reporting an unreachable destination) rather than HTTP_5XX (the origin
-    server itself failing).
+    ``body`` is the (bounded) response body; when a 4xx/5xx carries one of
+    the I2P proxy's error markers it is classified as I2P_DEST_NOT_FOUND
+    (the proxy reporting an unreachable destination) rather than HTTP_4XX /
+    HTTP_5XX (the origin server itself failing).
     """
     if status_code is None:
         return ErrorType.UNKNOWN_ERROR.value, "no HTTP status received"
     if status_code < 400:
         return None, None
-    if 400 <= status_code < 500:
-        return ErrorType.HTTP_4XX.value, f"HTTP {status_code}"
     if _looks_like_i2p_proxy_error(body):
         return (
             ErrorType.I2P_DEST_NOT_FOUND.value,
             f"HTTP {status_code} (I2P proxy: destination not found)",
         )
+    if 400 <= status_code < 500:
+        return ErrorType.HTTP_4XX.value, f"HTTP {status_code}"
     return ErrorType.HTTP_5XX.value, f"HTTP {status_code}"
 
 

@@ -64,20 +64,26 @@ def _now_ms() -> int:
 
 
 def parse_routerinfo(data: bytes) -> dict:
-    """Best-effort parse of a routerInfo blob. Never raises."""
+    """Best-effort parse of a routerInfo blob. Never raises.
+
+    Router options (``router.version=``, ``caps=``) are serialized by I2P
+    as length-prefixed key/value pairs, e.g. ``b"\\x04caps=\\x03XfR;"``;
+    the regexes tolerate an optional single length-prefix byte between
+    ``=`` and the value, and still match the plain ASCII ``k=v`` form.
+    """
     info: dict = {
         "version": None, "caps": None, "floodfill": False, "published_at": None,
     }
     try:
         if not data or len(data) < 400:
             return info
-        text = data.decode("latin-1")
-        match = re.search(r"router\.version=([0-9][0-9A-Za-z.\-]*)", text)
+        # Optional [\x00-\x1f] tolerates I2P's length-prefix byte before the value.
+        match = re.search(rb"router\.version=(?:[\x00-\x1f])?([0-9][0-9A-Za-z.\-]{0,31})", data)
         if match:
-            info["version"] = match.group(1)[:32]
-        match = re.search(r"caps=([A-Za-z]+)", text)
+            info["version"] = match.group(1).decode("ascii", "replace")[:32]
+        match = re.search(rb"caps=(?:[\x00-\x1f])?([A-Za-z]{1,16})", data)
         if match:
-            caps = match.group(1)[:16]
+            caps = match.group(1).decode("ascii", "replace")[:16]
             info["caps"] = caps
             info["floodfill"] = "f" in caps or "F" in caps
         cert_len = struct.unpack(">H", data[385:387])[0]

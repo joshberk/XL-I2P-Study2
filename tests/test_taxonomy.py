@@ -64,8 +64,36 @@ def test_i2p_proxy_destination_not_found_split():
     assert etype == ErrorType.HTTP_5XX.value
     etype, _ = classify_http_status(500, b"")
     assert etype == ErrorType.HTTP_5XX.value
-    # 4xx is unaffected even if the body mentions I2P errors.
+    # A 4xx carrying the proxy marker is the proxy reporting an unreachable
+    # destination (e.g. the template-based "400 Destination Not Found"),
+    # not an origin 4xx.
     etype, _ = classify_http_status(404, I2P_PROXY_503_BODY)
+    assert etype == ErrorType.I2P_DEST_NOT_FOUND.value
+    etype, _ = classify_http_status(400, I2P_PROXY_TEMPLATE_BODY)
+    assert etype == ErrorType.I2P_DEST_NOT_FOUND.value
+    # A plain 4xx with no proxy marker stays HTTP_4XX.
+    etype, _ = classify_http_status(404, b"<html><body>not here</body></html>")
     assert etype == ErrorType.HTTP_4XX.value
     # 2xx never classifies, regardless of body.
     assert classify_http_status(200, I2P_PROXY_503_BODY) == (None, None)
+
+
+I2P_PROXY_TEMPLATE_BODY = (
+    b"<html><head><title>502 Domain Not Found</title>"
+    b'<link rel="stylesheet" href="http://proxy.i2p/themes/console/classic/console.css">'
+    b"</head><body><h1>Domain Not Found</h1></body></html>"
+)
+
+
+def test_i2p_proxy_template_marker():
+    # Since I2P 0.9.49 the proxy serves error pages from templates that do
+    # not contain "I2P ERROR"; they all link proxy.i2p/themes/console/...,
+    # which is language-independent.
+    etype, msg = classify_http_status(502, I2P_PROXY_TEMPLATE_BODY)
+    assert etype == ErrorType.I2P_DEST_NOT_FOUND.value
+    assert "502" in msg
+    etype, _ = classify_http_status(504, I2P_PROXY_TEMPLATE_BODY)
+    assert etype == ErrorType.I2P_DEST_NOT_FOUND.value
+    # A 502 page with neither marker is an origin server failure.
+    etype, _ = classify_http_status(502, b"<html><body>Bad gateway</body></html>")
+    assert etype == ErrorType.HTTP_5XX.value

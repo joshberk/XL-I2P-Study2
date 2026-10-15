@@ -88,6 +88,10 @@ class Settings:
     max_concurrent_requests: int = _int("MAX_CONCURRENT_REQUESTS", 5)
     max_concurrent_sites: int = _int("MAX_CONCURRENT_SITES", 2)
     request_timeout_seconds: float = _float("REQUEST_TIMEOUT_SECONDS", 60)
+    # Total wall-clock budget per fetch (connect + read). httpx's
+    # request_timeout_seconds is per read operation, so a server that keeps
+    # dribbling bytes defeats it; this deadline bounds the whole fetch.
+    fetch_total_timeout_seconds: float = _float("FETCH_TOTAL_TIMEOUT_SECONDS", 180)
     max_pages_per_site: int = _int("MAX_PAGES_PER_SITE", 25)
     max_depth_per_site: int = _int("MAX_DEPTH_PER_SITE", 2)
     crawl_delay_seconds: float = _float("CRAWL_DELAY_SECONDS", 2)
@@ -150,7 +154,9 @@ class Settings:
         data = {}
         for f in fields(self):
             value = getattr(self, f.name)
-            if f.name == "db_password":
+            if f.name in ("db_password", "dashboard_token"):
+                # Secrets must not land in epochs.config_json (which is
+                # exported in the per-epoch manifest).
                 value = "***"
             data[f.name] = value
         return data

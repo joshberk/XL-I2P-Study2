@@ -41,7 +41,16 @@ def normalize_url(url: str) -> str:
 
 
 def host_from_url(url: str) -> str | None:
+    """Host for a crawled link: only the URL's own hostname, and only if
+    it is an .i2p name.
+
+    The old fallback regex-searched the whole URL for anything looking
+    like an .i2p host, which invented I2P edges: ``github.com/i2p/i2p.i2p``
+    became an edge to ``i2p.i2p``, and router-console "add to addressbook"
+    links (``127.0.0.1:7657/...?hostname=foo.i2p``) became edges to
+    ``foo.i2p``. A non-.i2p URL is simply not an I2P edge.
+    """
     parsed = urlparse(url)
     if parsed.hostname and parsed.hostname.lower().endswith(".i2p"):
         return normalize_host(parsed.hostname)
-    return extract_i2p_host(url)
+    return None

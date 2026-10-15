@@ -24,7 +24,7 @@ for SAM LeaseSet lookups and its client-sampled netDb census.
 
 ```
 xl_i2p/            # crawler + read-only dashboard (xl_i2p/dashboard.py)
-tests/             # 62 tests, no real network (httpx mocked, SQLite)
+tests/             # 110 tests, no real network (httpx mocked, SQLite)
 systemd/           # crawler, dashboard, and epoch-rollover units
 schema.sql         # MariaDB schema (9 tables + 2 views)
 .env.example       # copy to .env — every setting documented, sane defaults
@@ -158,6 +158,13 @@ network-observation layer: VM1's client-sampled netDb view
 (`vps_floodfill_netdb`) — genuinely different sensors, analyzed
 separately (see "Source-type discipline" below).
 
+Named-host reachability additionally depends on the VPS router's
+addressbook subscriptions: a seed name missing from them returns the
+proxy's "Domain Not Found" (classified `I2P_DEST_NOT_FOUND`) even if the
+site is alive elsewhere. That is a vantage artifact, not a dead site —
+keep the VPS subscriptions aligned with the Study 1 vantage's and note it
+in the methods.
+
 1. On VM1, generate a dedicated key as the crawler user and note its
    fingerprint:
    `ssh-keygen -t ed25519 -f ~/.ssh/vps_tunnel -N "" -C "vm1-crawler-tunnel"`
@@ -285,7 +292,7 @@ python -m xl_i2p --version
 
 ## Tests
 
-`python -m pytest tests/ -q` — 62 tests, no real network (httpx mocked,
+`python -m pytest tests/ -q` — 110 tests, no real network (httpx mocked,
 SQLite). Covers janitor recovery, backoff, taxonomy, epoch tagging and
 rollover, seed dedup, page-cap strictness, kill-mid-cycle restart
 simulation, the cross-layer association loop (pass selection,
@@ -326,8 +333,10 @@ scans netDb → JSONL batches (6-hour timer), `ship.py` rsyncs them to VM2
 for weeks before the measurement window** — week-1 census data is warmup.
 
 **Source-type discipline:** `local_netdb` (VM1 client-sampled) vs
-`vps_floodfill_netdb` (VPS floodfill, full DHT). Analysis must filter on
-`source_type`; the two are never interchangeable.
+`vps_floodfill_netdb` (VPS floodfill-sampled view: one floodfill sees the
+routers that publish to it, not the whole DHT — prior I2P census work used
+many floodfills). Analysis must filter on `source_type`; the two are never
+interchangeable.
 
 The old floodfill-gated `harvest_netdb()` (`FLOODFILL_MODE`) remains for a
 future floodfill-capable vantage host and stays disabled here.

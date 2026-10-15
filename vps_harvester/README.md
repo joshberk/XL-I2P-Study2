@@ -11,7 +11,9 @@ be a floodfill. The 4-month application-layer crawl is unaffected and stays
 on VM1; this sensor supplies the network-layer half of the cross-layer story.
 
 **Source-type discipline (load-bearing for the dissertation's disclosure):**
-- `vps_floodfill_netdb` — full-DHT view from this floodfill sensor.
+- `vps_floodfill_netdb` — floodfill-sampled view from this sensor (one
+  floodfill sees the routers that publish to it, not the whole DHT; prior
+  I2P census work used many floodfills).
 - `local_netdb` — client-sampled view from the VM1 vantage router's own
   netDb store (recorded by the crawler itself, Tier 1).
 Analysis must always filter on `source_type`; the two are never interchangeable.

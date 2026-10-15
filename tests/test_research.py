@@ -124,9 +124,9 @@ def test_api_research_kpis(rapp):
     assert k["discovered_via_links"] == 1
 
 
-def test_api_research_survival(rapp):
+def test_api_research_discovery(rapp):
     data = _get(rapp, "/api/research").get_json()
-    sv = data["survival"]
+    sv = data["discovery"]
     assert sv["final_reachable"] == 3
     assert sv["final_crawled"] == 1
     assert "<svg" in sv["svg"]

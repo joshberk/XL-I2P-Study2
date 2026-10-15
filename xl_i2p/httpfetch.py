@@ -9,6 +9,7 @@ for hours, starving the heartbeat and flipping the dashboard to DEAD.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -34,7 +35,8 @@ class FetchResult:
 
 
 async def fetch_bounded(
-    client: httpx.AsyncClient, url: str, cap_bytes: int | None = None
+    client: httpx.AsyncClient, url: str, cap_bytes: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> FetchResult:
     """GET ``url`` without ever buffering more than ``cap_bytes``.
 
@@ -44,9 +46,37 @@ async def fetch_bounded(
          before reading any body bytes;
       2. the streamed body crosses the cap mid-download -> abort and
          discard the partial buffer.
+
+    A total wall-clock deadline (``timeout_seconds``, default
+    ``FETCH_TOTAL_TIMEOUT_SECONDS``) bounds the whole fetch. httpx's
+    per-operation timeout cannot do this: a server that keeps dribbling
+    bytes defeats per-read timeouts. Exceeding the deadline is reported
+    as READ_TIMEOUT, never raised.
     """
     cap = settings.max_content_bytes if cap_bytes is None else cap_bytes
+    total_timeout = (
+        settings.fetch_total_timeout_seconds if timeout_seconds is None
+        else timeout_seconds
+    )
     started = time.perf_counter()
+    try:
+        if total_timeout is not None:
+            return await asyncio.wait_for(
+                _fetch_bounded_inner(client, url, cap, started), total_timeout
+            )
+        return await _fetch_bounded_inner(client, url, cap, started)
+    except TimeoutError:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        return FetchResult(
+            url, None, None, None, elapsed_ms,
+            ErrorType.READ_TIMEOUT.value,
+            f"total fetch deadline exceeded ({total_timeout}s)",
+        )
+
+
+async def _fetch_bounded_inner(
+    client: httpx.AsyncClient, url: str, cap: int, started: float
+) -> FetchResult:
     try:
         async with client.stream(
             "GET", url, headers={"User-Agent": settings.user_agent}

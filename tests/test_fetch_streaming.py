@@ -154,3 +154,49 @@ def test_verify_url_ok_and_error_contracts():
     assert ok[0] is True and ok[1] == 200 and ok[2] is None
     assert err[0] is False and err[1] == 500
     assert err[2] == ErrorType.HTTP_5XX.value
+
+
+def test_total_deadline_bounds_trickling_body():
+    # A server that dribbles bytes forever defeats per-read timeouts; the
+    # total deadline must bound the whole fetch and report READ_TIMEOUT.
+    chunks_read = 0
+
+    async def body():
+        nonlocal chunks_read
+        while True:
+            chunks_read += 1
+            await asyncio.sleep(0.05)
+            yield b"x" * 100  # far below any byte cap
+
+    async def handler(request):
+        return httpx.Response(200, content=body())
+
+    async def go():
+        async with _client(handler) as client:
+            return await fetch_bounded(
+                client, "http://x.i2p/trickle", cap_bytes=10_000_000,
+                timeout_seconds=0.3,
+            )
+
+    import time
+    started = time.perf_counter()
+    r = asyncio.run(go())
+    elapsed = time.perf_counter() - started
+    assert r.error_type == ErrorType.READ_TIMEOUT.value
+    assert r.content is None
+    assert "deadline" in (r.error_message or "")
+    assert elapsed < 5, f"deadline did not bound the fetch (took {elapsed:.1f}s)"
+    assert chunks_read < 1000, "kept reading long after the deadline"
+
+
+def test_total_deadline_none_disables():
+    async def handler(request):
+        return httpx.Response(200, content=b"ok")
+
+    async def go():
+        async with _client(handler) as client:
+            return await fetch_bounded(
+                client, "http://x.i2p/", timeout_seconds=None)
+
+    r = asyncio.run(go())
+    assert r.status_code == 200 and r.error_type is None

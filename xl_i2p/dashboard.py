@@ -637,7 +637,7 @@ def _render_research(stats: dict | None, token_param: str) -> str:
     """Server-render the research archive page; JS soft-refreshes every 5 min."""
     s = stats or {}
     k = s.get("kpis") or {}
-    surv = s.get("survival") or {}
+    surv = s.get("discovery") or {}
     ledger = s.get("ledger") or []
     flaps = s.get("flap_leaders") or []
 
@@ -787,7 +787,7 @@ a.navlink{font-size:.78rem;color:#2dd4bf;background:#16203a;padding:6px 14px;bor
 </div>
 
 <div class="card">
-  <h2>Survival &mdash; cumulative distinct sites ever seen alive, by day</h2>
+  <h2>Discovery &mdash; cumulative distinct sites ever seen alive, by day</h2>
   <div id="r-svg">__SURV_SVG__</div>
   <div class="legend"><span><span class="sw" style="background:#2dd4bf"></span>ever reachable (<span id="r-sr">__SURV_R__</span>)</span><span><span class="sw" style="background:#2ecc71"></span>ever crawled (<span id="r-sc">__SURV_C__</span>)</span><span class="muted">day 0 = epoch start &middot; <span id="r-days">__SURV_DAYS__</span> days</span></div>
 </div>
@@ -830,7 +830,7 @@ async function refresh(){
   try {
     const r = await fetch("/api/research" + qs());
     if (!r.ok) return;
-    const s = await r.json(), k = s.kpis || {}, sv = s.survival || {};
+    const s = await r.json(), k = s.kpis || {}, sv = s.discovery || {};
     set("r-epoch", s.epoch_label || "none");
     set("r-ever-reach", k.ever_reachable); set("r-ever-reach-e", k.ever_reachable_this_epoch);
     set("r-ever-crawl", k.ever_crawled); set("r-ever-crawl-e", k.ever_crawled_this_epoch);
@@ -1110,7 +1110,7 @@ def _first_success_dates(session, attempt_type: str) -> list:
     return [r[0] for r in rows if r[0] is not None]
 
 
-def _survival_series(dates: list, day0, days: int) -> list[int]:
+def _cumulative_discovery_series(dates: list, day0, days: int) -> list[int]:
     per_day = [0] * (days + 1)
     for d in dates:
         idx = (d - day0).days
@@ -1123,8 +1123,8 @@ def _survival_series(dates: list, day0, days: int) -> list[int]:
     return out
 
 
-def _survival_svg(series: list[tuple], days: int) -> str:
-    """Render cumulative survival curves as inline SVG. No JS chart lib needed."""
+def _cumulative_discovery_svg(series: list[tuple], days: int) -> str:
+    """Render cumulative discovery curves as inline SVG. No JS chart lib needed."""
     W, H, PL, PB, PT = 600, 220, 46, 26, 12
     mx = max([v for _, s, _ in series for v in s] + [1])
 
@@ -1291,7 +1291,8 @@ def _collect_research(session) -> dict:
         or 0
     )
 
-    # Survival curves: day 0 = epoch start if known, else first success.
+    # Discovery curves (cumulative first-success, not survival analysis):
+    # day 0 = epoch start if known, else first success.
     reach_dates = _first_success_dates(session, AttemptType.VERIFY.value)
     crawl_dates = _first_success_dates(session, AttemptType.CRAWL.value)
     all_dates = reach_dates + crawl_dates
@@ -1302,8 +1303,8 @@ def _collect_research(session) -> dict:
     else:
         day0 = now
     days = max(0, (now - day0).days)
-    reach_series = _survival_series(reach_dates, day0, days)
-    crawl_series = _survival_series(crawl_dates, day0, days)
+    reach_series = _cumulative_discovery_series(reach_dates, day0, days)
+    crawl_series = _cumulative_discovery_series(crawl_dates, day0, days)
 
     return {
         "generated_at": now.isoformat(),
@@ -1324,9 +1325,9 @@ def _collect_research(session) -> dict:
             "xlayer_validated": xlayer_validated,
             "discovered_via_links": discovered_via_links,
         },
-        "survival": {
+        "discovery": {
             "days": days,
-            "svg": _survival_svg(
+            "svg": _cumulative_discovery_svg(
                 [
                     ("ever reachable", reach_series, "#2dd4bf"),
                     ("ever crawled", crawl_series, "#2ecc71"),

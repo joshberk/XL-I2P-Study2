@@ -24,6 +24,32 @@ from .verifier import verify_batch
 logger = logging.getLogger(__name__)
 
 
+async def _heartbeat_watchdog(
+    label_box: dict, counters: dict, stop: asyncio.Event
+) -> None:
+    """Write a heartbeat every ``heartbeat_seconds`` on an independent task.
+
+    The cycle-bound heartbeats in ``run_loop`` only fire when a cycle
+    starts/finishes, so a wedged cycle (e.g. a multi-minute fetch) starves
+    the dashboard and reads as DEAD even though the process is alive. The
+    watchdog keeps firing regardless of where the cycle is stuck, so the
+    dashboard can distinguish "wedged" (watchdog fresh, phase stuck) from
+    "dead" (nothing fresh). ``label_box`` is a mutable mapping holding the
+    current epoch label, updated by the loop on rollover.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(
+                write_heartbeat, label_box.get("epoch_label"), "watchdog", counters
+            )
+        except Exception:
+            logger.debug("watchdog heartbeat failed", exc_info=True)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.heartbeat_seconds)
+        except TimeoutError:
+            pass
+
+
 def resolve_running_epoch(session, epoch_id: int) -> Epoch | None:
     """Return the epoch the loop should currently write to.
 
@@ -115,95 +141,110 @@ async def run_loop(
     last_leaseset_mono: float | None = None
     logger.info("scheduler loop started for epoch '%s'", epoch_label)
 
-    while True:
-        counters["cycles"] += 1
-        write_heartbeat(epoch_label, "cycle", counters)
-        try:
-            with SessionLocal() as session:
-                # Backstop: roll the epoch here too, in case the systemd
-                # rollover timer is down. Idempotent; the timer normally wins.
-                rollover_if_due(session)
-                epoch = resolve_running_epoch(session, epoch_id)
-                if epoch is not None:
-                    epoch_label, epoch_id = epoch.label, epoch.id
-            if epoch is None:
-                logger.warning("no open epoch; waiting for one to be opened")
-                write_heartbeat(epoch_label, "no-epoch", counters)
-                await asyncio.sleep(sleep_seconds)
-                continue
-            if not tcp_proxy_available():
-                # I2P router restarting: skip the cycle instead of burning
-                # verify/crawl attempts against a dead proxy.
-                logger.warning("I2P proxy down; skipping cycle %d", counters["cycles"])
-                write_heartbeat(epoch_label, "proxy-down", counters)
-                await asyncio.sleep(sleep_seconds)
-                continue
-            result = await run_once(epoch, verify_limit=verify_limit, crawl_limit=crawl_limit)
-            verify_result, crawl_result = result["verify"], result["crawl"]
-            counters["verified"] += verify_result.get("verified", 0)
-            counters["reachable"] += verify_result.get("reachable", 0)
-            counters["sites_crawled"] += crawl_result.get("sites", 0)
-            counters["pages_fetched"] += crawl_result.get("pages_fetched", 0)
-            counters["links_found"] += crawl_result.get("links_found", 0)
-            counters["errors"] += verify_result.get("failed", 0) + crawl_result.get("errors", 0)
-            logger.info("cycle %d done: verify=%s crawl=%s",
-                        counters["cycles"], verify_result, crawl_result)
-            # Tier 1 cross-layer: bounded per-epoch association pass. Runs in
-            # a worker thread (blocking SAM/console I/O) with its own session.
-            # SAM-down degrades to zeros inside the pass; anything else is
-            # caught here so the loop always continues.
+    # Background heartbeat: keeps the dashboard truthful even when a cycle
+    # is wedged mid-fetch. Stopped in the finally below.
+    label_box: dict = {"epoch_label": epoch_label}
+    stop_watchdog = asyncio.Event()
+    watchdog_task = asyncio.create_task(
+        _heartbeat_watchdog(label_box, counters, stop_watchdog)
+    )
+    try:
+        while True:
+            counters["cycles"] += 1
+            write_heartbeat(epoch_label, "cycle", counters)
             try:
-                if settings.xlink_enabled:
-                    xlayer_result = await asyncio.to_thread(
-                        _run_xlayer_pass_sync, epoch_id,
-                        settings.xlink_per_cycle_limit)
-                    counters["xlayer_lookups"] += xlayer_result.get("lookups", 0)
-                    counters["xlayer_validated"] += xlayer_result.get("validated", 0)
-                    logger.info("cycle %d xlayer: %s", counters["cycles"], xlayer_result)
+                with SessionLocal() as session:
+                    # Backstop: roll the epoch here too, in case the systemd
+                    # rollover timer is down. Idempotent; the timer normally wins.
+                    rollover_if_due(session)
+                    epoch = resolve_running_epoch(session, epoch_id)
+                    if epoch is not None:
+                        epoch_label, epoch_id = epoch.label, epoch.id
+                        label_box["epoch_label"] = epoch_label
+                if epoch is None:
+                    logger.warning("no open epoch; waiting for one to be opened")
+                    write_heartbeat(epoch_label, "no-epoch", counters)
+                    await asyncio.sleep(sleep_seconds)
+                    continue
+                if not tcp_proxy_available():
+                    # I2P router restarting: skip the cycle instead of burning
+                    # verify/crawl attempts against a dead proxy.
+                    logger.warning("I2P proxy down; skipping cycle %d", counters["cycles"])
+                    write_heartbeat(epoch_label, "proxy-down", counters)
+                    await asyncio.sleep(sleep_seconds)
+                    continue
+                result = await run_once(epoch, verify_limit=verify_limit, crawl_limit=crawl_limit)
+                verify_result, crawl_result = result["verify"], result["crawl"]
+                counters["verified"] += verify_result.get("verified", 0)
+                counters["reachable"] += verify_result.get("reachable", 0)
+                counters["sites_crawled"] += crawl_result.get("sites", 0)
+                counters["pages_fetched"] += crawl_result.get("pages_fetched", 0)
+                counters["links_found"] += crawl_result.get("links_found", 0)
+                counters["errors"] += verify_result.get("failed", 0) + crawl_result.get("errors", 0)
+                logger.info("cycle %d done: verify=%s crawl=%s",
+                            counters["cycles"], verify_result, crawl_result)
+                # Tier 1 cross-layer: bounded per-epoch association pass. Runs in
+                # a worker thread (blocking SAM/console I/O) with its own session.
+                # SAM-down degrades to zeros inside the pass; anything else is
+                # caught here so the loop always continues.
+                try:
+                    if settings.xlink_enabled:
+                        xlayer_result = await asyncio.to_thread(
+                            _run_xlayer_pass_sync, epoch_id,
+                            settings.xlink_per_cycle_limit)
+                        counters["xlayer_lookups"] += xlayer_result.get("lookups", 0)
+                        counters["xlayer_validated"] += xlayer_result.get("validated", 0)
+                        logger.info("cycle %d xlayer: %s", counters["cycles"], xlayer_result)
+                except Exception:
+                    logger.exception("cross-layer pass failed; continuing")
+                    counters["errors"] += 1
+                # Tier 1 local netDb census, at most once per interval.
+                try:
+                    if settings.netdb_census_enabled:
+                        now_mono = time.monotonic()
+                        if (last_census_mono is None
+                                or now_mono - last_census_mono >= settings.netdb_census_interval_seconds):
+                            census_result = await asyncio.to_thread(_run_census_sync, epoch_id)
+                            last_census_mono = time.monotonic()
+                            counters["netdb_census_recorded"] += census_result.get("recorded", 0)
+                            logger.info("cycle %d netdb census: %s", counters["cycles"], census_result)
+                except Exception:
+                    logger.exception("local netDb census failed; continuing")
+                    counters["errors"] += 1
+                # Lease-set discovery feed: admit new .b32.i2p destinations from
+                # the VPS floodfill harvest, at most once per interval. Bounded
+                # per run; the verify pass sorts web services from noise.
+                try:
+                    if settings.leaseset_discovery_enabled:
+                        now_mono = time.monotonic()
+                        if (last_leaseset_mono is None
+                                or now_mono - last_leaseset_mono >= settings.leaseset_discovery_interval_seconds):
+                            disc_result = await asyncio.to_thread(
+                                _run_leaseset_discovery_sync, epoch_id,
+                                settings.leaseset_discovery_per_run)
+                            last_leaseset_mono = time.monotonic()
+                            counters["leaseset_admitted"] = (
+                                counters.get("leaseset_admitted", 0)
+                                + disc_result.get("admitted", 0)
+                            )
+                            logger.info("cycle %d leaseset discovery: %s",
+                                        counters["cycles"], disc_result)
+                except Exception:
+                    logger.exception("lease-set discovery admission failed; continuing")
+                    counters["errors"] += 1
+            except asyncio.CancelledError:
+                logger.info("scheduler loop cancelled")
+                raise
             except Exception:
-                logger.exception("cross-layer pass failed; continuing")
+                # The loop must survive anything a cycle throws.
+                logger.exception("cycle %d failed; continuing", counters["cycles"])
                 counters["errors"] += 1
-            # Tier 1 local netDb census, at most once per interval.
-            try:
-                if settings.netdb_census_enabled:
-                    now_mono = time.monotonic()
-                    if (last_census_mono is None
-                            or now_mono - last_census_mono >= settings.netdb_census_interval_seconds):
-                        census_result = await asyncio.to_thread(_run_census_sync, epoch_id)
-                        last_census_mono = time.monotonic()
-                        counters["netdb_census_recorded"] += census_result.get("recorded", 0)
-                        logger.info("cycle %d netdb census: %s", counters["cycles"], census_result)
-            except Exception:
-                logger.exception("local netDb census failed; continuing")
-                counters["errors"] += 1
-            # Lease-set discovery feed: admit new .b32.i2p destinations from
-            # the VPS floodfill harvest, at most once per interval. Bounded
-            # per run; the verify pass sorts web services from noise.
-            try:
-                if settings.leaseset_discovery_enabled:
-                    now_mono = time.monotonic()
-                    if (last_leaseset_mono is None
-                            or now_mono - last_leaseset_mono >= settings.leaseset_discovery_interval_seconds):
-                        disc_result = await asyncio.to_thread(
-                            _run_leaseset_discovery_sync, epoch_id,
-                            settings.leaseset_discovery_per_run)
-                        last_leaseset_mono = time.monotonic()
-                        counters["leaseset_admitted"] = (
-                            counters.get("leaseset_admitted", 0)
-                            + disc_result.get("admitted", 0)
-                        )
-                        logger.info("cycle %d leaseset discovery: %s",
-                                    counters["cycles"], disc_result)
-            except Exception:
-                logger.exception("lease-set discovery admission failed; continuing")
-                counters["errors"] += 1
-        except asyncio.CancelledError:
-            logger.info("scheduler loop cancelled")
-            raise
-        except Exception:
-            # The loop must survive anything a cycle throws.
-            logger.exception("cycle %d failed; continuing", counters["cycles"])
-            counters["errors"] += 1
 
-        write_heartbeat(epoch_label, "sleep", counters)
-        await asyncio.sleep(sleep_seconds)
+            write_heartbeat(epoch_label, "sleep", counters)
+            await asyncio.sleep(sleep_seconds)
+    finally:
+        stop_watchdog.set()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass

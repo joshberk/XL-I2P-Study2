@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -33,7 +34,7 @@ def get_epoch(session: Session, label: str) -> Epoch | None:
     return session.scalar(select(Epoch).where(Epoch.label == label))
 
 
-def open_epoch(session: Session, label: str, note: str | None = None) -> Epoch:
+def open_epoch(session: Session, label: str, note: str | None = None, _commit: bool = True) -> Epoch:
     """Open a new epoch and reset the cohort's retry schedule for re-probing."""
     label = label.strip()
     if not label:
@@ -55,14 +56,17 @@ def open_epoch(session: Session, label: str, note: str | None = None) -> Epoch:
     session.flush()
     # Cohort reset: every site becomes eligible for re-verification this epoch.
     # Terminal-for-epoch states (UNREACHABLE/ERROR) are re-probed because their
-    # last_checked_at predates this epoch's start.
+    # last_checked_at predates this epoch's start. failure_count is reset too:
+    # it measures *consecutive* failures (retry.py), so the streak must not
+    # leak across epochs.
     # NOTE: updated_at is pinned explicitly — session.execute(update(Site))
     # is ORM-enabled and would otherwise fire onupdate=now on every row,
     # which would mask stuck VERIFYING/CRAWLING rows from the janitor.
     result = session.execute(
-        update(Site).values(next_retry_at=None, updated_at=Site.updated_at)
+        update(Site).values(next_retry_at=None, failure_count=0, updated_at=Site.updated_at)
     )
-    session.commit()
+    if _commit:
+        session.commit()
     logger.info(
         "opened epoch '%s' (id=%d); reset next_retry_at for %d sites",
         label,
@@ -72,7 +76,7 @@ def open_epoch(session: Session, label: str, note: str | None = None) -> Epoch:
     return epoch
 
 
-def close_epoch(session: Session, label: str) -> Epoch:
+def close_epoch(session: Session, label: str, _commit: bool = True) -> Epoch:
     epoch = get_epoch(session, label)
     if epoch is None:
         raise EpochError(f"no such epoch '{label}'")
@@ -80,7 +84,8 @@ def close_epoch(session: Session, label: str) -> Epoch:
         raise EpochError(f"epoch '{label}' is not OPEN")
     epoch.status = EpochStatus.CLOSED.value
     epoch.ended_at = now()
-    session.commit()
+    if _commit:
+        session.commit()
     logger.info("closed epoch '%s'", label)
     return epoch
 
@@ -122,12 +127,19 @@ def rollover_if_due(session: Session) -> Epoch | None:
         age_days,
         settings.epoch_duration_days,
     )
-    close_epoch(session, current.label)
+    # Atomic close+open in a single transaction. The old two-commit sequence
+    # could crash in between, leaving no open epoch: the crawler then waits
+    # forever ("no open epoch") and the timer sees nothing to roll.
     try:
+        close_epoch(session, current.label, _commit=False)
         new_epoch = open_epoch(session, _next_label(current.label),
-                               note=f"auto-rollover from '{current.label}'")
-    except EpochError:
-        # Lost a race with another rollover actor; return whatever is open.
+                               note=f"auto-rollover from '{current.label}'",
+                               _commit=False)
+        session.commit()
+    except (EpochError, IntegrityError):
+        session.rollback()
+        # Lost a race with another rollover actor (duplicate label), or the
+        # epoch vanished; return whatever is open.
         logger.info("rollover race detected; using the epoch opened by the winner")
         new_epoch = get_open_epoch(session)
         if new_epoch is None:

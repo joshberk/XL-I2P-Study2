@@ -259,6 +259,9 @@ async def _crawl_one_site_inner(
     if counts["pages_fetched"] > 0 and counts["errors"] < counts["pages_fetched"]:
         site.state = SiteState.CRAWLED.value
         site.success_count += 1
+        # failure_count is consecutive: a success clears the streak, so the
+        # retry-exhaustion limit (retry.py) measures consecutive failures.
+        site.failure_count = 0
         site.last_seen_at = now()
         site.last_error_type = None
         site.last_error_message = None

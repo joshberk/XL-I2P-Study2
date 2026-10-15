@@ -362,10 +362,21 @@ def _candidate_values_from_file(path: Path) -> Iterable[str]:
 def persist_cross_layer_result(session: Session, result: CrossLayerResult, source_detail: str | None = None, enqueue_all: bool = False, epoch_id: int | None = None) -> bool:
     if not result.host:
         return False
+    # Anchor everything to the site for the INPUT value, not the derived
+    # b32. result.host becomes the b32 once a SAM naming lookup succeeds,
+    # and upserting on it used to (a) create a duplicate b32 Site row for
+    # every named eepsite, (b) attach the CrossLayerObservation to that b32
+    # row so the named site never satisfied the association pass's
+    # "already observed" filter and was re-selected every cycle (an
+    # ORDER BY id stall), and (c) reset REACHABLE/CRAWLED rows to
+    # DISCOVERED on re-lookup. The b32 remains recorded as
+    # canonical_b32 on the observation.
+    input_host, _ = canonicalize_input(result.input_value)
+    site_host = input_host or result.host
     should_enqueue = result.leaseset_found or enqueue_all
     site = upsert_site(
         session,
-        result.host,
+        site_host,
         source="cross_layer",
         state_if_new=SiteState.DISCOVERED.value if should_enqueue else SiteState.NEW.value,
         network_source=result.lookup_method,
@@ -373,17 +384,18 @@ def persist_cross_layer_result(session: Session, result: CrossLayerResult, sourc
         is_cross_layer=True,
     )
     if result.leaseset_found:
-        site.state = SiteState.DISCOVERED.value
+        # Never demote: a validated site keeps its pipeline state. Genuinely
+        # new rows were already queued as DISCOVERED by state_if_new above.
         site.is_cross_layer = True
         site.discovery_method = result.lookup_method
         site.network_source = result.lookup_method
         site.cross_layer_validated_at = now()
         site.last_network_observed_at = now()
-    record_seed_event(session, result.host, "cross_layer", source_detail or result.lookup_method, epoch_id=epoch_id)
+    record_seed_event(session, site_host, "cross_layer", source_detail or result.lookup_method, epoch_id=epoch_id)
     session.add(CrossLayerObservation(
         site_id=site.id,
         epoch_id=epoch_id,
-        host=result.host,
+        host=site_host,
         input_value=result.input_value[:2048],
         canonical_b32=result.canonical_b32,
         lookup_method=result.lookup_method,
@@ -492,8 +504,11 @@ def parse_routerinfo_bytes(data: bytes) -> dict[str, object]:
     - Published timestamp: 8-byte big-endian integer right after the
       identity, milliseconds since Unix epoch (Java Date.getTime()).
       Accepted only within [2020-01-01, now+7d]; otherwise None.
-    - Router options (``router.version=``, ``caps=``) appear as ASCII
-      ``k=v`` pairs later in the blob; extracted with regexes.
+    - Router options (``router.version=``, ``caps=``) appear later in the
+      blob. I2P serializes them as length-prefixed key/value pairs, e.g.
+      ``b"\\x04caps=\\x03XfR;"``; the regexes tolerate an optional single
+      length-prefix byte between ``=`` and the value, and still match the
+      plain ASCII ``k=v`` form.
     The filename hash is always the ground truth for router identity;
     everything here is auxiliary metadata.
     """
@@ -503,13 +518,13 @@ def parse_routerinfo_bytes(data: bytes) -> dict[str, object]:
     try:
         if not data or len(data) < 400:
             return info
-        text = data.decode("latin-1")
-        match = re.search(r"router\.version=([0-9][0-9A-Za-z.\-]*)", text)
+        # Optional [\x00-\x1f] tolerates I2P's length-prefix byte before the value.
+        match = re.search(rb"router\.version=(?:[\x00-\x1f])?([0-9][0-9A-Za-z.\-]{0,31})", data)
         if match:
-            info["version"] = match.group(1)[:32]
-        match = re.search(r"caps=([A-Za-z]+)", text)
+            info["version"] = match.group(1).decode("ascii", "replace")[:32]
+        match = re.search(rb"caps=(?:[\x00-\x1f])?([A-Za-z]{1,16})", data)
         if match:
-            caps = match.group(1)[:16]
+            caps = match.group(1).decode("ascii", "replace")[:16]
             info["caps"] = caps
             info["floodfill"] = "f" in caps or "F" in caps
         cert_len = struct.unpack(">H", data[385:387])[0]
@@ -568,7 +583,10 @@ def census_local_netdb(session: Session, epoch_id: int | None) -> dict[str, int]
                 continue
             info = parse_routerinfo_bytes(data)
             try:
-                observed = datetime.fromtimestamp(fp.stat().st_mtime)
+                # st_mtime is a Unix timestamp; interpret as UTC like every
+                # other timestamp in the schema (naive UTC for MariaDB).
+                observed = datetime.fromtimestamp(
+                    fp.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None)
             except OSError:
                 observed = now()
             session.add(NetworkObservation(
