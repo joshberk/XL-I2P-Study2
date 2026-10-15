@@ -190,14 +190,14 @@ the crawler for VM1's disk/CPU:
 
 ```bash
 # on VM2, as root: create the write-capable rollover DB user first
-mysql -e "CREATE USER 'rollover'@'localhost' IDENTIFIED BY '<password>'; \
-  GRANT SELECT ON xl_i2p_study2.* TO 'rollover'@'localhost'; \
-  GRANT INSERT, UPDATE ON xl_i2p_study2.epochs TO 'rollover'@'localhost';"
+# (MariaDB binds to 192.167.48.48, no TCP on loopback - same pattern as
+# the dashboard/ingest users):
+#   CREATE USER 'rollover'@'192.167.48.48' IDENTIFIED BY '<password>';
+#   GRANT SELECT ON xl_i2p_study2.* TO 'rollover'@'192.167.48.48';
+#   GRANT INSERT, UPDATE ON xl_i2p_study2.epochs TO 'rollover'@'192.167.48.48';
 # /opt/xl-i2p/rollover.env (chmod 600):
-#   DATABASE_URL=mysql+pymysql://rollover:<password>@localhost/xl_i2p_study2?charset=utf8mb4
+#   DATABASE_URL=mysql+pymysql://rollover:<password>@192.167.48.48:3306/xl_i2p_study2?charset=utf8mb4
 #   EXPORT_DIR=/opt/xl-i2p/exports
-# (host is "localhost", not 127.0.0.1: MariaDB binds to 192.167.48.48 and
-# refuses TCP on loopback; "localhost" uses the Unix socket.)
 sudo cp systemd/xl-i2p-epoch-rollover-vm2.service systemd/xl-i2p-epoch-rollover-vm2.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now xl-i2p-epoch-rollover-vm2.timer
 # on VM1: the old timer is retired

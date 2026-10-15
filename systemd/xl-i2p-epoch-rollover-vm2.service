@@ -16,10 +16,11 @@ Group=xl-i2p
 WorkingDirectory=/opt/xl-i2p/xl-i2p-study2-workaround
 # Rollover needs a WRITE-capable DB user (INSERT/UPDATE on epochs, SELECT
 # on all tables for the export) - not the dashboard's read-only user.
-# rollover.env: DATABASE_URL=mysql+pymysql://rollover:<pw>@localhost/xl_i2p_study2?charset=utf8mb4
+# rollover.env: DATABASE_URL=mysql+pymysql://rollover:<pw>@192.167.48.48:3306/xl_i2p_study2?charset=utf8mb4
 #               EXPORT_DIR=/opt/xl-i2p/exports
-# NOTE: host must be "localhost" (Unix socket), not 127.0.0.1: MariaDB on
-# VM2 binds to 192.167.48.48 and refuses TCP on the loopback interface.
+# NOTE: MariaDB on VM2 binds to 192.167.48.48 (no TCP on loopback), so the
+# user must be 'rollover'@'192.167.48.48' - same pattern as the dashboard
+# and ingest users. PyMySQL does not auto-use the Unix socket.
 EnvironmentFile=/opt/xl-i2p/rollover.env
 # No-op unless the open epoch reached EPOCH_DURATION_DAYS.
 ExecStart=/opt/xl-i2p/xl-i2p-study2-workaround/.venv/bin/python -m xl_i2p epoch rollover --export-closed
