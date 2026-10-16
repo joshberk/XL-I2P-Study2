@@ -22,6 +22,7 @@ import json
 import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 from sqlalchemy import case, func, select, text
@@ -171,6 +172,22 @@ def _collect(session) -> dict:
             counters = json.loads(latest.counters_json or "{}")
         except (TypeError, ValueError):
             pass
+        if not isinstance(counters, dict):
+            counters = {}
+        # STALLED: the process beats (watchdog) but no unit of work has
+        # completed for longer than the crawler's own derived threshold
+        # (carried in the beat, so it reflects the crawler's real config,
+        # not dashboard.env). Only evaluated while beats are fresh: STALE
+        # and DEAD take precedence. Beats from older crawler builds lack
+        # the fields and keep the previous behavior.
+        since_progress = counters.get("seconds_since_progress")
+        stall_after = counters.get("stall_after_seconds")
+        progress_age = None
+        if isinstance(since_progress, (int, float)):
+            progress_age = since_progress + max(0.0, age_s)
+            if (status == "ALIVE" and isinstance(stall_after, (int, float))
+                    and progress_age > stall_after):
+                status = "STALLED"
         liveness = {
             "status": status,
             "last_seen": latest.updated_at.isoformat(),
@@ -178,6 +195,9 @@ def _collect(session) -> dict:
             "phase": latest.phase,
             "cycles": counters.get("cycles"),
             "seconds_since_last_fetch": counters.get("seconds_since_last_fetch"),
+            "seconds_since_progress": (
+                round(progress_age, 1) if progress_age is not None else None),
+            "stall_after_seconds": stall_after,
         }
 
     heartbeats = []
@@ -481,6 +501,19 @@ def create_app(token: str | None = None) -> Flask:
     return app
 
 
+def _e(value) -> str:
+    """HTML-escape a value for server-side interpolation into the page.
+
+    Every string that comes from the database must pass through this:
+    site hosts are taken from links on crawled eepsites, and
+    ``urlparse("http://<img src=x onerror=...>.i2p/").hostname`` is a
+    valid-looking ``.i2p`` host, so an eepsite can plant markup in the
+    flap-leader and stuck-site lists (stored XSS, CWE-79). Labels, phases,
+    error/source names are escaped too for uniformity.
+    """
+    return html_escape(str(value), quote=True)
+
+
 def _js_string_literal(value: str) -> str:
     """Render a string as a JS string literal safe to inline in <script>.
 
@@ -517,8 +550,8 @@ def _render(stats: dict | None, token_param: str) -> str:
         cells = []
         for st in order:
             cells.append(
-                f'<div class="cell"><span class="k">{st}</span>'
-                f'<span class="v" id="st-{st}">{by_state.get(st, 0)}</span></div>'
+                f'<div class="cell"><span class="k">{_e(st)}</span>'
+                f'<span class="v" id="st-{_e(st)}">{by_state.get(st, 0)}</span></div>'
             )
         return "".join(cells)
 
@@ -531,7 +564,7 @@ def _render(stats: dict | None, token_param: str) -> str:
         for name, cnt in rows:
             w = max(2, int(cnt / mx * 100))
             out.append(
-                f'<div class="stat"><span class="mono">{name}</span><b>{cnt}</b></div>'
+                f'<div class="stat"><span class="mono">{_e(name)}</span><b>{cnt}</b></div>'
                 f'<div class="bar"><i style="width:{w}%"></i></div>'
             )
         return "".join(out)
@@ -540,8 +573,8 @@ def _render(stats: dict | None, token_param: str) -> str:
         if not mapping:
             return '<div class="stat"><span class="muted">—</span><span></span></div>'
         return "".join(
-            f'<div class="stat"><span class="mono">{k}</span><b>{v}</b></div>'
-            for k, v in sorted(mapping.items())
+            f'<div class="stat"><span class="mono">{_e(k)}</span><b>{v}</b></div>'
+            for k, v in sorted(mapping.items(), key=lambda kv: str(kv[0]))
         )
 
     def _xl_net_bars(mapping: dict) -> str:
@@ -549,10 +582,10 @@ def _render(stats: dict | None, token_param: str) -> str:
             return '<p class="muted">—</p>'
         mx = max(mapping.values()) or 1
         out = []
-        for k, v in sorted(mapping.items()):
+        for k, v in sorted(mapping.items(), key=lambda kv: str(kv[0])):
             w = max(2, int(v / mx * 100))
             out.append(
-                f'<div class="stat"><span class="mono">{k}</span><b>{v}</b></div>'
+                f'<div class="stat"><span class="mono">{_e(k)}</span><b>{v}</b></div>'
                 f'<div class="bar teal"><i style="width:{w}%"></i></div>'
             )
         return "".join(out)
@@ -565,13 +598,14 @@ def _render(stats: dict | None, token_param: str) -> str:
         for b in rows:
             cyc = b.get("cycles")
             out.append(
-                f'<tr><td class="mono">{b.get("at") or "—"}</td>'
-                f'<td>{b.get("phase") or "—"}</td>'
+                f'<tr><td class="mono">{_e(b.get("at") or "—")}</td>'
+                f'<td>{_e(b.get("phase") or "—")}</td>'
                 f'<td class="num">{cyc if cyc is not None else "—"}</td></tr>'
             )
         return "".join(out)
 
-    live_class = {"ALIVE": "ok", "STALE": "warn", "DEAD": "bad"}.get(live.get("status"), "muted")
+    live_class = {"ALIVE": "ok", "STALE": "warn", "STALLED": "warn", "DEAD": "bad"}.get(
+        live.get("status"), "muted")
     last_seen_txt = (
         _age_str(datetime.fromisoformat(live["last_seen"])) if live.get("last_seen") else "never"
     )
@@ -579,6 +613,12 @@ def _render(stats: dict | None, token_param: str) -> str:
     live_fetch_txt = (
         f"{since_fetch:.0f}s ago" if isinstance(since_fetch, (int, float)) else "—"
     )
+    since_progress = live.get("seconds_since_progress")
+    live_progress_txt = (
+        f"{since_progress:.0f}s ago" if isinstance(since_progress, (int, float)) else "—"
+    )
+    # Phase comes from the crawler DB row: escape before inlining into HTML.
+    live_phase_txt = _e(live.get("phase") or "—")
 
     def _daily_churn_table() -> str:
         rows = s.get("daily_churn") or []
@@ -616,13 +656,15 @@ def _render(stats: dict | None, token_param: str) -> str:
 
     stats_json = json.dumps(s)
     html = _PAGE_TEMPLATE
-    html = html.replace("__EPOCH_LABEL__", epoch.get("label") or "none")
+    html = html.replace("__EPOCH_LABEL__", _e(epoch.get("label") or "none"))
     html = html.replace("__AGE_DAYS__", str(epoch.get("age_days", "—")))
     html = html.replace("__ROLLOVER_DAYS__", str(epoch.get("days_until_rollover", "—")))
     html = html.replace("__LIVE_CLASS__", live_class)
     html = html.replace("__LIVE_STATUS__", str(live.get("status", "UNKNOWN")))
     html = html.replace("__LIVE_SEEN__", last_seen_txt)
     html = html.replace("__LIVE_FETCH__", live_fetch_txt)
+    html = html.replace("__LIVE_PROGRESS__", live_progress_txt)
+    html = html.replace("__LIVE_PHASE__", live_phase_txt)
     html = html.replace("__COHORT_TOTAL__", str(cohort.get("total", 0)))
     html = html.replace("__STATE_CELLS__", _state_cells())
     html = html.replace("__VERIFY__", str((s.get("this_epoch") or {}).get("verify_attempts", "—")))
@@ -644,9 +686,14 @@ def _render(stats: dict | None, token_param: str) -> str:
     html = html.replace("__STUCK_COUNT__", str(stuck.get("count", 0)))
     html = html.replace(
         "__STUCK_HOSTS__",
-        ", ".join(stuck.get("hosts") or []) or "none",
+        _e(", ".join(stuck.get("hosts") or []) or "none"),
     )
-    html = html.replace("__STATS_JSON__", stats_json.replace("</", "<\\/"))
+    # JSON inlined in <script>: unicode-escape <, > and & so no DB string
+    # (e.g. a crawled host) can close the script or open a comment.
+    html = html.replace(
+        "__STATS_JSON__",
+        stats_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"),
+    )
     html = html.replace("__TOKEN_QS__", _js_string_literal(token_param))
     html = html.replace(
         "__R_TOKEN__",
@@ -671,7 +718,7 @@ def _render_research(stats: dict | None, token_param: str) -> str:
             lost = "—" if row["lost"] is None else str(row["lost"])
             newly = "—" if row["newly_reachable"] is None else str(row["newly_reachable"])
             out.append(
-                f'<tr><td class="mono">{row["label"]} <span class="muted">({row["status"]})</span></td>'
+                f'<tr><td class="mono">{_e(row["label"])} <span class="muted">({_e(row["status"])})</span></td>'
                 f'<td class="num">{row["ever_reachable"]}</td>'
                 f'<td class="num">{row["ever_crawled"]}</td>'
                 f'<td class="num">{lost}</td>'
@@ -690,7 +737,7 @@ def _render_research(stats: dict | None, token_param: str) -> str:
                 else '<span class="pill bad">dead</span>'
             )
             out.append(
-                f'<tr><td class="mono">{f["host"]}</td>'
+                f'<tr><td class="mono">{_e(f["host"])}</td>'
                 f'<td class="num">{f["transitions"]}</td>'
                 f"<td>{pill}</td></tr>"
             )
@@ -717,7 +764,7 @@ def _render_research(stats: dict | None, token_param: str) -> str:
 
     lifetime = k.get("cohort_lifetime_pct")
     html = _RESEARCH_TEMPLATE
-    html = html.replace("__EPOCH_LABEL__", s.get("epoch_label") or "none")
+    html = html.replace("__EPOCH_LABEL__", _e(s.get("epoch_label") or "none"))
     html = html.replace("__EVER_REACH__", str(k.get("ever_reachable", "—")))
     html = html.replace("__EVER_CRAWL__", str(k.get("ever_crawled", "—")))
     html = html.replace("__EVER_REACH_E__", str(k.get("ever_reachable_this_epoch", "—")))
@@ -975,6 +1022,7 @@ th{color:#9fb0c9;font-weight:600;font-size:.75rem;text-transform:uppercase;lette
   <span class="chip">epoch <b class="mono" id="epoch-label">__EPOCH_LABEL__</b> &middot; <span id="epoch-age">__AGE_DAYS__ days</span> old &middot; rollover in <span id="epoch-roll">__ROLLOVER_DAYS__</span>d</span>
   <span class="chip">last beat <span id="live-seen">__LIVE_SEEN__</span></span>
   <span class="chip">last fetch <span id="live-fetch">__LIVE_FETCH__</span></span>
+  <span class="chip">progress <span id="live-progress">__LIVE_PROGRESS__</span> &middot; phase <b class="mono" id="live-phase">__LIVE_PHASE__</b></span>
   <a class="navlink" href="/research__R_TOKEN__">Research archive &rarr;</a>
 </div>
 
@@ -1044,7 +1092,7 @@ let boot = __STATS_JSON__;
 function qs(){ return TOKEN_QS ? "?token=" + encodeURIComponent(TOKEN_QS) : ""; }
 function set(id, v){ const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.textContent = v; }
 function pct(r){ return r == null ? "—" : (r*100).toFixed(1) + "%"; }
-function pillClass(s){ return "pill " + ({ALIVE:"ok",STALE:"warn",DEAD:"bad"}[s] || "muted"); }
+function pillClass(s){ return "pill " + ({ALIVE:"ok",STALE:"warn",STALLED:"warn",DEAD:"bad"}[s] || "muted"); }
 function apply(s){
   const e = s.epoch || {}, t = s.this_epoch || {}, c = s.cohort || {},
         bs = c.by_state || {}, l = s.liveness || {}, xl = s.cross_layer || {},
@@ -1054,6 +1102,8 @@ function apply(s){
   set("live-status", l.status);
   set("live-seen", l.last_seen ? new Date(l.last_seen + "Z").toLocaleString() : "never");
   set("live-fetch", (typeof l.seconds_since_last_fetch === "number") ? Math.round(l.seconds_since_last_fetch) + "s ago" : "—");
+  set("live-progress", (typeof l.seconds_since_progress === "number") ? Math.round(l.seconds_since_progress) + "s ago" : "—");
+  set("live-phase", l.phase || "—");
   set("epoch-label", e.label || "none");
   set("epoch-age", (e.age_days ?? "—") + " days");
   set("epoch-roll", e.days_until_rollover ?? "—");

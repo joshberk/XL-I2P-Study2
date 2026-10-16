@@ -13,6 +13,7 @@ import logging
 import logging.handlers
 import os
 import socket
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,7 +69,15 @@ def write_heartbeat(
     counters: dict | None = None,
     log_dir: str | None = None,
 ) -> dict:
-    """Write heartbeat.json and upsert the DB heartbeat row (best effort)."""
+    """Write heartbeat.json and upsert the DB heartbeat row. Never raises.
+
+    Called concurrently from two worker threads (the loop's phase beats and
+    the watchdog). The file is replaced atomically via a *unique* temp file:
+    the old fixed name ``heartbeat.json.tmp`` let two writers share one temp
+    path, so the second ``replace()`` found it already moved and raised
+    FileNotFoundError — from a call site outside any try, killing the loop.
+    Both the file and the DB row are best effort.
+    """
     beat = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "pid": os.getpid(),
@@ -77,11 +86,24 @@ def write_heartbeat(
         "phase": phase,
         "counters": counters or {},
     }
-    path = heartbeat_path(log_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(beat, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    tmp_name: str | None = None
+    try:
+        path = heartbeat_path(log_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=".heartbeat.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(beat, indent=2))
+        os.replace(tmp_name, path)
+        tmp_name = None
+    except Exception:
+        logging.getLogger(__name__).debug("heartbeat file write failed", exc_info=True)
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
     try:
         from .db import SessionLocal

@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Awaitable, Callable
 
 from .config import settings
 from .crawler import crawl_batch
 from .epochs import get_open_epoch, rollover_if_due
-from . import httpfetch
+from . import httpfetch, progress
 from .logging_setup import write_heartbeat
 from .models import Epoch
 from .proxy import tcp_proxy_available
@@ -25,35 +26,55 @@ from .verifier import verify_batch
 logger = logging.getLogger(__name__)
 
 
+def _beat_counters(counters: dict, state: dict) -> dict:
+    """Snapshot of the loop counters plus the progress fields every beat carries.
+
+    A copy, never the live dict: beats are serialized in worker threads
+    while the loop keeps mutating ``counters``. Both the watchdog and the
+    loop's own boundary beats use this, so the latest heartbeat row always
+    has the progress fields no matter which writer wrote it last.
+    """
+    snapshot = dict(counters)
+    last_completed = httpfetch.last_fetch_completed_at
+    snapshot["seconds_since_last_fetch"] = (
+        round(time.monotonic() - last_completed, 1)
+        if last_completed is not None else None
+    )
+    snapshot["seconds_since_progress"] = progress.seconds_since_progress()
+    snapshot["stall_after_seconds"] = state.get(
+        "stall_after_seconds", progress.stall_after_seconds())
+    return snapshot
+
+
 async def _heartbeat_watchdog(
-    label_box: dict, counters: dict, stop: asyncio.Event
+    state: dict, counters: dict, stop: asyncio.Event
 ) -> None:
     """Write a heartbeat every ``heartbeat_seconds`` on an independent task.
 
     The cycle-bound heartbeats in ``run_loop`` only fire when a cycle
     starts/finishes, so a wedged cycle (e.g. a multi-minute fetch) starves
     the dashboard and reads as DEAD even though the process is alive. The
-    watchdog keeps firing regardless of where the cycle is stuck, so the
-    dashboard can distinguish "wedged" (watchdog fresh, phase stuck) from
-    "dead" (nothing fresh). ``label_box`` is a mutable mapping holding the
-    current epoch label, updated by the loop on rollover.
+    watchdog keeps firing regardless of where the cycle is stuck.
 
-    Each beat also carries ``seconds_since_last_fetch`` (time since any
-    fetch completed): a fresh heartbeat with a stale completion timestamp
-    means "alive but stuck", not "healthy". The timeout catch is
-    version-robust: on Python 3.10 ``asyncio.TimeoutError`` is distinct
-    from the builtin (unified in 3.11), and an uncaught timeout would
-    silently kill this task.
+    ``state`` is a mutable mapping owned by the loop: ``epoch_label``
+    (updated on rollover), ``phase`` (the loop's current phase — written
+    as-is so a wedge shows *where* it is stuck, e.g. "crawl", instead of
+    being overwritten with "watchdog") and ``stall_after_seconds``.
+
+    Liveness alone would show ALIVE through an entire wedge, so each beat
+    also carries ``seconds_since_progress`` and ``stall_after_seconds``;
+    the dashboard reports STALLED when the former exceeds the latter.
+
+    The timeout catch is version-robust: on Python 3.10
+    ``asyncio.TimeoutError`` is distinct from the builtin (unified in 3.11),
+    and an uncaught timeout would silently kill this task.
     """
     while not stop.is_set():
-        last_completed = httpfetch.last_fetch_completed_at
-        counters["seconds_since_last_fetch"] = (
-            round(time.monotonic() - last_completed, 1)
-            if last_completed is not None else None
-        )
+        snapshot = _beat_counters(counters, state)
         try:
             await asyncio.to_thread(
-                write_heartbeat, label_box.get("epoch_label"), "watchdog", counters
+                write_heartbeat, state.get("epoch_label"),
+                state.get("phase") or "watchdog", snapshot,
             )
         except Exception:
             logger.debug("watchdog heartbeat failed", exc_info=True)
@@ -88,14 +109,24 @@ async def run_once(
     epoch: Epoch,
     verify_limit: int | None = None,
     crawl_limit: int | None = None,
+    on_phase: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, dict[str, int]]:
+    """One verify pass then one crawl pass.
+
+    ``on_phase`` (optional) is awaited with "verify" / "crawl" as each pass
+    starts, so the heartbeat can report which pass a long cycle is in.
+    """
     from .db import SessionLocal
 
     verify_limit = settings.verify_limit if verify_limit is None else verify_limit
     crawl_limit = settings.crawl_limit if crawl_limit is None else crawl_limit
 
+    if on_phase is not None:
+        await on_phase("verify")
     with SessionLocal() as session:
         verify_result = await verify_batch(session, verify_limit, epoch)
+    if on_phase is not None:
+        await on_phase("crawl")
     with SessionLocal() as session:
         crawl_result = await crawl_batch(session, crawl_limit, epoch)
     return {"verify": verify_result, "crawl": crawl_result}
@@ -146,16 +177,41 @@ async def run_loop(
     logger.info("scheduler loop started for epoch '%s'", epoch_label)
 
     # Background heartbeat: keeps the dashboard truthful even when a cycle
-    # is wedged mid-fetch. Stopped in the finally below.
-    label_box: dict = {"epoch_label": epoch_label}
+    # is wedged mid-fetch. Stopped in the finally below. ``state`` is shared
+    # with the watchdog (current epoch label + phase + stall threshold).
+    state: dict = {
+        "epoch_label": epoch_label,
+        "phase": "starting",
+        "stall_after_seconds": progress.stall_after_seconds(sleep_seconds),
+    }
+    progress.mark_progress()
+
+    async def beat(phase: str) -> None:
+        """Phase-boundary heartbeat. Never raises, never blocks the loop.
+
+        A phase boundary is forward progress. The write runs in a worker
+        thread (a slow DB connect must not stall in-flight fetches) and is
+        guarded: an error here used to propagate out of run_loop — these
+        calls sit outside the per-cycle try — and kill the process.
+        """
+        state["phase"] = phase
+        progress.mark_progress()
+        try:
+            await asyncio.to_thread(
+                write_heartbeat, state["epoch_label"], phase,
+                _beat_counters(counters, state),
+            )
+        except Exception:
+            logger.debug("heartbeat write failed (phase=%s)", phase, exc_info=True)
+
     stop_watchdog = asyncio.Event()
     watchdog_task = asyncio.create_task(
-        _heartbeat_watchdog(label_box, counters, stop_watchdog)
+        _heartbeat_watchdog(state, counters, stop_watchdog)
     )
     try:
         while True:
             counters["cycles"] += 1
-            write_heartbeat(epoch_label, "cycle", counters)
+            await beat("cycle")
             try:
                 with SessionLocal() as session:
                     # Backstop: roll the epoch here too, in case the systemd
@@ -164,20 +220,21 @@ async def run_loop(
                     epoch = resolve_running_epoch(session, epoch_id)
                     if epoch is not None:
                         epoch_label, epoch_id = epoch.label, epoch.id
-                        label_box["epoch_label"] = epoch_label
+                        state["epoch_label"] = epoch_label
                 if epoch is None:
                     logger.warning("no open epoch; waiting for one to be opened")
-                    write_heartbeat(epoch_label, "no-epoch", counters)
+                    await beat("no-epoch")
                     await asyncio.sleep(sleep_seconds)
                     continue
                 if not tcp_proxy_available():
                     # I2P router restarting: skip the cycle instead of burning
                     # verify/crawl attempts against a dead proxy.
                     logger.warning("I2P proxy down; skipping cycle %d", counters["cycles"])
-                    write_heartbeat(epoch_label, "proxy-down", counters)
+                    await beat("proxy-down")
                     await asyncio.sleep(sleep_seconds)
                     continue
-                result = await run_once(epoch, verify_limit=verify_limit, crawl_limit=crawl_limit)
+                result = await run_once(epoch, verify_limit=verify_limit,
+                                        crawl_limit=crawl_limit, on_phase=beat)
                 verify_result, crawl_result = result["verify"], result["crawl"]
                 counters["verified"] += verify_result.get("verified", 0)
                 counters["reachable"] += verify_result.get("reachable", 0)
@@ -193,6 +250,7 @@ async def run_loop(
                 # caught here so the loop always continues.
                 try:
                     if settings.xlink_enabled:
+                        await beat("xlayer")
                         xlayer_result = await asyncio.to_thread(
                             _run_xlayer_pass_sync, epoch_id,
                             settings.xlink_per_cycle_limit)
@@ -208,6 +266,7 @@ async def run_loop(
                         now_mono = time.monotonic()
                         if (last_census_mono is None
                                 or now_mono - last_census_mono >= settings.netdb_census_interval_seconds):
+                            await beat("census")
                             census_result = await asyncio.to_thread(_run_census_sync, epoch_id)
                             last_census_mono = time.monotonic()
                             counters["netdb_census_recorded"] += census_result.get("recorded", 0)
@@ -223,7 +282,7 @@ async def run_loop(
                 logger.exception("cycle %d failed; continuing", counters["cycles"])
                 counters["errors"] += 1
 
-            write_heartbeat(epoch_label, "sleep", counters)
+            await beat("sleep")
             await asyncio.sleep(sleep_seconds)
     finally:
         stop_watchdog.set()

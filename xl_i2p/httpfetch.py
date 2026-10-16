@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from . import progress
 from .config import settings
 from .states import ErrorType
 from .taxonomy import classify_exception, classify_http_status
@@ -45,6 +46,8 @@ last_fetch_completed_at: float | None = None
 def _mark_fetch_completed() -> None:
     global last_fetch_completed_at
     last_fetch_completed_at = time.monotonic()
+    # A completed fetch is also generic forward progress (stall detection).
+    progress.mark_progress()
 
 
 def _elapsed_ms(started: float) -> int:

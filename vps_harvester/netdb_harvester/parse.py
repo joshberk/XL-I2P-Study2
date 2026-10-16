@@ -13,9 +13,12 @@ Byte-layout assumptions (documented for the dissertation appendix):
 - Router published timestamp: 8-byte big-endian integer immediately after
   the identity, milliseconds since Unix epoch (Java Date.getTime()).
   Accepted only within [2020-01-01, now+7d]; otherwise None.
-- Router options (``router.version=``, ``caps=``) appear as ASCII ``k=v``
-  pairs later in the blob; extracted with regexes on a best-effort basis.
-  A ``caps`` value containing ``f``/``F`` marks a floodfill router.
+- Router options (``router.version=``, ``caps=``) are an I2P Mapping:
+  length-prefixed key/value strings, e.g. ``b"\\x04caps=\\x03XfR;"``,
+  extracted with regexes on a best-effort basis. Each SSU/SSU2 transport
+  address has its own ``caps`` option and the addresses come BEFORE the
+  router options, so the router's caps is the LAST ``caps=`` occurrence.
+  A router ``caps`` value containing ``f``/``F`` marks a floodfill router.
 
 The filename hash is always ground truth for identity; everything parsed
 from the binary is auxiliary metadata. All functions are defensive and
@@ -74,7 +77,16 @@ def parse_routerinfo(data: bytes) -> dict:
         match = re.search(rb"router\.version=(?:[\x00-\x1f])?([0-9][0-9A-Za-z.\-]{0,31})", data)
         if match:
             info["version"] = match.group(1).decode("ascii", "replace")[:32]
-        match = re.search(rb"caps=(?:[\x00-\x1f])?([A-Za-z]{1,16})", data)
+        # A RouterInfo carries more than one "caps" key: every SSU/SSU2
+        # transport address has its own (values like "B", "BC", "B4", "4"),
+        # and the addresses are serialized BEFORE the router options
+        # mapping. The router's capability string (bandwidth class, the
+        # floodfill flag "f", R/U reachability) lives in the options
+        # mapping, which is the last mapping in the structure, so the LAST
+        # "caps=" occurrence is the router's. The first match is usually
+        # the SSU2 address's and reports floodfill=False for floodfills.
+        matches = list(re.finditer(rb"caps=(?:[\x00-\x1f])?([A-Za-z]{1,16})", data))
+        match = matches[-1] if matches else None
         if match:
             caps = match.group(1).decode("ascii", "replace")[:16]
             info["caps"] = caps

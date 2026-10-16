@@ -32,7 +32,7 @@ from .models import (
     SeedEvent,
     Site,
 )
-from .states import AttemptStatus, AttemptType
+from .states import AttemptStatus, AttemptType, EpochStatus
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,69 @@ def export_epoch(
     logger.info("epoch '%s' exported to %s (%s)",
                 epoch_label, out_dir, json.dumps(manifest["row_counts"], sort_keys=True))
     return manifest_path
+
+
+def exported_epoch_labels(export_dir: str | Path | None = None) -> set[str]:
+    """Labels of epochs that already have a complete export under ``export_dir``.
+
+    An export is complete once its ``manifest.json`` exists: export_epoch
+    writes the manifest last, so a crashed export (directory without a
+    manifest) is not counted and gets retried. Labels are read from the
+    manifest itself, never parsed from directory names (a label such as
+    ``a`` would otherwise match ``epoch_a_b_...``).
+    """
+    root = Path(export_dir or settings.export_dir)
+    labels: set[str] = set()
+    if not root.is_dir():
+        return labels
+    for manifest in root.glob("epoch_*/manifest.json"):
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("unreadable export manifest %s; ignoring", manifest)
+            continue
+        label = data.get("epoch_label") if isinstance(data, dict) else None
+        if isinstance(label, str) and label:
+            labels.add(label)
+    return labels
+
+
+def export_pending_epochs(
+    session: Session, export_dir: str | Path | None = None
+) -> tuple[list[Path], list[str]]:
+    """Export every CLOSED epoch that has no complete export yet.
+
+    Why this exists: two actors can roll an epoch — the VM2 rollover timer
+    (daily) and the crawler's in-loop backstop on VM1 (every cycle). The
+    backstop almost always wins, minutes after the epoch turns due, so a
+    timer that only exported "the epoch I just closed myself" would never
+    export anything. Exporting by *state* (closed and not yet exported)
+    makes the result independent of who rolled, and backfills
+    automatically after downtime. Idempotent: re-running exports nothing.
+
+    Returns (manifest paths written, labels that failed). One failing
+    export does not stop the others.
+    """
+    root = Path(export_dir or settings.export_dir)
+    done = exported_epoch_labels(root)
+    closed = list(
+        session.scalars(
+            select(Epoch)
+            .where(Epoch.status == EpochStatus.CLOSED.value)
+            .order_by(Epoch.id)
+        )
+    )
+    written: list[Path] = []
+    failed: list[str] = []
+    for epoch in closed:
+        if epoch.label in done:
+            continue
+        try:
+            written.append(export_epoch(session, epoch.label, str(root)))
+        except Exception:
+            logger.exception("export of closed epoch '%s' failed", epoch.label)
+            failed.append(epoch.label)
+    return written, failed
 
 
 def export_graph_csv(
