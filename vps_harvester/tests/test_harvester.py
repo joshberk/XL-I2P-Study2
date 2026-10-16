@@ -76,6 +76,53 @@ def test_parse_routerinfo_length_prefixed_options():
     assert info["published_at"] is not None
 
 
+def _i2p_string(value: str) -> bytes:
+    raw = value.encode()
+    return bytes([len(raw)]) + raw  # DataHelper.writeString
+
+
+def _i2p_mapping(options: dict) -> bytes:
+    body = b"".join(
+        _i2p_string(k) + b"=" + _i2p_string(v) + b";" for k, v in sorted(options.items())
+    )
+    return struct.pack(">H", len(body)) + body  # DataHelper.writeProperties
+
+
+def _router_address(style: str, options: dict) -> bytes:
+    # RouterAddress: cost(1) + expiration(8) + transport style + options.
+    return b"\x0a" + b"\x00" * 8 + _i2p_string(style) + _i2p_mapping(options)
+
+
+def make_realistic_routerinfo(router_caps: str, ssu2_caps: str) -> bytes:
+    """RouterInfo in the real field order: identity, published, addresses
+    (each with its own options), peer size, router options, signature."""
+    identity = (b"\x01" * 256 + b"\x02" * 128 + b"\x05"
+                + struct.pack(">H", 4) + b"\x00\x07\x00\x04")
+    published = struct.pack(">Q", _now_ms() - 3600_000)
+    addresses = (
+        _router_address("NTCP2", {"host": "198.51.100.7", "port": "18443", "v": "2"})
+        + _router_address("SSU2", {"caps": ssu2_caps, "host": "198.51.100.7",
+                                   "port": "18443", "v": "2"})
+    )
+    options = _i2p_mapping({"caps": router_caps, "netId": "2",
+                            "router.version": "0.9.67"})
+    return identity + published + b"\x02" + addresses + b"\x00" + options + b"\x00" * 64
+
+
+@pytest.mark.parametrize("ssu2_caps", ["BC", "B4", "B", "4", "46"])
+def test_parse_routerinfo_uses_router_caps_not_ssu2_address_caps(ssu2_caps):
+    """Regression: the first caps= in a RouterInfo is usually the SSU2
+    address's ("BC", "B4"...), which reported every floodfill as False."""
+    info = parse_routerinfo(make_realistic_routerinfo("XfR", ssu2_caps))
+    assert info["caps"] == "XfR"
+    assert info["floodfill"] is True
+    assert info["version"] == "0.9.67"
+
+    info = parse_routerinfo(make_realistic_routerinfo("LR", ssu2_caps))
+    assert info["caps"] == "LR"
+    assert info["floodfill"] is False
+
+
 def test_parse_routerinfo_truncated_never_raises():
     for blob in (b"", b"\x00" * 10, os.urandom(2000)):
         info = parse_routerinfo(blob)

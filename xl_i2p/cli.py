@@ -135,16 +135,22 @@ def epoch_list() -> None:
 @epoch_app.command("rollover")
 def epoch_rollover(
     export_closed: bool = typer.Option(
-        False, help="Export the closed epoch (CSVs + SQL dump + SHA-256 manifest)."),
+        False, help="Export every CLOSED epoch that has no manifest under the "
+                    "export dir yet (CSVs + SQL dump + SHA-256 manifest), "
+                    "whoever rolled it."),
     out_dir: Path = typer.Option(Path(settings.export_dir), help="Export root directory."),
 ) -> None:
     """Close the open epoch and open the next one if it reached EPOCH_DURATION_DAYS.
 
-    Intended to run daily from the xl-i2p-epoch-rollover systemd timer; it is
-    a no-op when the epoch is not due yet. The running crawler also calls this
-    as a backstop, and switches to the new epoch on its next cycle.
+    Intended to run daily from the xl-i2p-epoch-rollover-vm2 timer; the
+    rollover step is a no-op when the epoch is not due yet. The running
+    crawler also rolls over as a backstop (and usually wins, since it checks
+    every cycle), so with --export-closed the export step does not depend on
+    this invocation having done the rollover: it exports every closed epoch
+    that is not exported yet.
     """
     from .epochs import rollover_if_due
+    from .export import export_pending_epochs
 
     setup_logging()
     with session_scope() as session:
@@ -153,18 +159,26 @@ def epoch_rollover(
         result = rollover_if_due(session)
     if result is None:
         console.print("[yellow]No open epoch; nothing to roll over.[/yellow]")
-        return
-    if before_label is not None and result.label == before_label:
+    elif before_label is not None and result.label == before_label:
         console.print(
             f"[green]Epoch '{result.label}' not due for rollover yet.[/green]")
+    else:
+        console.print(
+            f"[green]Rolled over: closed '{before_label}', opened '{result.label}' "
+            f"(id={result.id}).[/green]")
+    if not export_closed:
         return
-    console.print(
-        f"[green]Rolled over: closed '{before_label}', opened '{result.label}' "
-        f"(id={result.id}).[/green]")
-    if export_closed and before_label:
-        with session_scope() as session:
-            manifest = export_epoch(session, before_label, str(out_dir))
+    with session_scope() as session:
+        written, failed = export_pending_epochs(session, out_dir)
+    for manifest in written:
         console.print(f"[green]Exported closed epoch. Manifest: {manifest}[/green]")
+    if not written and not failed:
+        console.print("[green]No closed epochs awaiting export.[/green]")
+    if failed:
+        console.print(f"[red]Export failed for: {', '.join(failed)}[/red]")
+        # Non-zero exit so the systemd unit shows failed and it is noticed;
+        # the next daily run retries (no manifest was written).
+        raise typer.Exit(1)
 
 
 @seeds_app.command("import")

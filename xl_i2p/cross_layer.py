@@ -19,6 +19,7 @@ from typing import Iterable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import progress
 from .config import settings
 from .models import CrossLayerObservation, now
 from .seeds import record_seed_event, upsert_site
@@ -238,7 +239,12 @@ def load_floodfill_hashes(limit: int | None = None) -> list[str]:
     if not path:
         return []
     floodfills: list[str] = []
-    for fp in path.rglob("routerInfo-*.dat"):
+    for scanned, fp in enumerate(path.rglob("routerInfo-*.dat"), start=1):
+        # One `strings` subprocess per file (5 s timeout each) over a
+        # netDb of thousands of files: report progress so a long scan is
+        # not mistaken for a stall.
+        if scanned % 100 == 0:
+            progress.mark_progress()
         try:
             result = subprocess.run(["strings", str(fp)], capture_output=True, text=True, timeout=5)
             if re.search(r"(^|\n)caps=\s*\n?[A-Za-z0-9]*f[A-Za-z0-9]*", result.stdout, flags=re.IGNORECASE):
@@ -522,7 +528,16 @@ def parse_routerinfo_bytes(data: bytes) -> dict[str, object]:
         match = re.search(rb"router\.version=(?:[\x00-\x1f])?([0-9][0-9A-Za-z.\-]{0,31})", data)
         if match:
             info["version"] = match.group(1).decode("ascii", "replace")[:32]
-        match = re.search(rb"caps=(?:[\x00-\x1f])?([A-Za-z]{1,16})", data)
+        # A RouterInfo carries more than one "caps" key: every SSU/SSU2
+        # transport address has its own (values like "B", "BC", "B4", "4"),
+        # and the addresses are serialized BEFORE the router options
+        # mapping. The router's capability string (bandwidth class, the
+        # floodfill flag "f", R/U reachability) lives in the options
+        # mapping, which is the last mapping in the structure, so the LAST
+        # "caps=" occurrence is the router's. The first match is usually
+        # the SSU2 address's and reports floodfill=False for floodfills.
+        matches = list(re.finditer(rb"caps=(?:[\x00-\x1f])?([A-Za-z]{1,16})", data))
+        match = matches[-1] if matches else None
         if match:
             caps = match.group(1).decode("ascii", "replace")[:16]
             info["caps"] = caps
@@ -565,6 +580,8 @@ def census_local_netdb(session: Session, epoch_id: int | None) -> dict[str, int]
             continue
         router_hash = match.group(1)
         counts["files"] += 1
+        if counts["files"] % 200 == 0:
+            progress.mark_progress()
         try:
             dup = session.scalar(
                 select(NetworkObservation.id).where(

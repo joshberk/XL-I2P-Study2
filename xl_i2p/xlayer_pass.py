@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import cross_layer as xl
+from . import progress
 from .config import settings
 from .models import CrossLayerObservation, Epoch, Site
 from .states import SiteState
@@ -81,6 +82,8 @@ def run_xlayer_pass(session: Session, epoch: Epoch, limit: int | None = None) ->
         except Exception:
             logger.exception("cross-layer lookup failed for %s", site.host)
             counts["errors"] += 1
+        # One bounded lookup done (SAM/console socket timeouts): progress.
+        progress.mark_progress()
     session.commit()
     logger.info("cross-layer pass for epoch '%s': %s", epoch.label, counts)
     return counts

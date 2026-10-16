@@ -122,6 +122,10 @@ class Settings:
     backoff_base_seconds: float = _float("BACKOFF_BASE_SECONDS", 60)
     backoff_max_seconds: float = _float("BACKOFF_MAX_SECONDS", 86400)
     heartbeat_seconds: int = _int("HEARTBEAT_SECONDS", 60)
+    # Added to the longest healthy wait (sleep, or one fetch at its total
+    # deadline) to derive the dashboard's STALLED threshold; see
+    # xl_i2p/progress.py::stall_after_seconds.
+    stall_margin_seconds: float = _float("STALL_MARGIN_SECONDS", 300)
     log_dir: str = os.getenv("LOG_DIR", "logs")
     export_dir: str = os.getenv("EXPORT_DIR", "exports")
 

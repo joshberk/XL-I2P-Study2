@@ -24,7 +24,7 @@ for SAM LeaseSet lookups and its client-sampled netDb census.
 
 ```
 xl_i2p/            # crawler + read-only dashboard (xl_i2p/dashboard.py)
-tests/             # 110 tests, no real network (httpx mocked, SQLite)
+tests/             # 139 tests, no real network (httpx mocked, SQLite)
 systemd/           # crawler, dashboard, and epoch-rollover units
 schema.sql         # MariaDB schema (9 tables + 2 views)
 .env.example       # copy to .env — every setting documented, sane defaults
@@ -81,12 +81,20 @@ enabled, MariaDB 10.6+.
   tighter of the fetch deadline and the site remainder. Exhaustion keeps
   the partial crawl and marks the attempt `SITE_BUDGET_EXHAUSTED`
   (truncated, not unreachable).
-- **Progress-aware watchdog** (`xl_i2p/scheduler.py`): an independent
-  heartbeat task fires every `heartbeat_seconds` and reports
-  `seconds_since_last_fetch`; the dashboard shows "last fetch Ns ago" next
-  to the liveness pill, so "alive but stuck" is distinguishable from
-  "healthy". `response_time_ms` measures the full transfer
-  (headers + body), not time-to-headers.
+- **Progress-aware watchdog** (`xl_i2p/scheduler.py`, `xl_i2p/progress.py`):
+  an independent heartbeat task fires every `heartbeat_seconds` and writes
+  the loop's *current phase* (`verify`, `crawl`, `xlayer`, `census`,
+  `sleep`, …), `seconds_since_last_fetch`, and `seconds_since_progress`
+  — time since any bounded unit of work completed (a fetch, a phase
+  boundary, a cross-layer lookup, a netDb-scan batch). The crawler also
+  sends its own `stall_after_seconds` = max(`SLEEP_SECONDS`,
+  `FETCH_TOTAL_TIMEOUT_SECONDS` + `CRAWL_DELAY_SECONDS`) +
+  `STALL_MARGIN_SECONDS` (600 s with defaults); the dashboard shows
+  **STALLED** when progress is older than that while beats are still
+  fresh, so "alive but stuck" is distinguishable from "healthy".
+  Heartbeat writes never raise (unique temp file per write; the two
+  writer threads used to race on one temp path). `response_time_ms`
+  measures the full transfer (headers + body), not time-to-headers.
 
 ## Deployment runbook
 
@@ -211,25 +219,44 @@ the crawler for VM1's disk/CPU:
 # (MariaDB binds to 192.167.48.48, no TCP on loopback - same pattern as
 # the dashboard/ingest users):
 #   CREATE USER 'rollover'@'192.167.48.48' IDENTIFIED BY '<password>';
-#   GRANT SELECT ON xl_i2p_study2.* TO 'rollover'@'192.167.48.48';
+#   -- SHOW VIEW: mysqldump needs it for the two v_induced_* views,
+#   -- otherwise full.sql is silently skipped (null in manifest.json).
+#   GRANT SELECT, SHOW VIEW ON xl_i2p_study2.* TO 'rollover'@'192.167.48.48';
 #   GRANT INSERT, UPDATE ON xl_i2p_study2.epochs TO 'rollover'@'192.167.48.48';
+#   -- open_epoch's cohort reset updates these three sites columns; without
+#   -- this grant the whole atomic rollover rolls back (error 1142).
+#   GRANT UPDATE (next_retry_at, failure_count, updated_at)
+#     ON xl_i2p_study2.sites TO 'rollover'@'192.167.48.48';
 # /opt/xl-i2p/rollover.env (chmod 600):
 #   DATABASE_URL=mysql+pymysql://rollover:<password>@192.167.48.48:3306/xl_i2p_study2?charset=utf8mb4
 #   EXPORT_DIR=/opt/xl-i2p/exports
+#   EPOCH_DURATION_DAYS=30   # must equal VM1's .env: both actors decide "due"
 sudo cp systemd/xl-i2p-epoch-rollover-vm2.service systemd/xl-i2p-epoch-rollover-vm2.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now xl-i2p-epoch-rollover-vm2.timer
 # on VM1: the old timer is retired
 sudo systemctl disable --now xl-i2p-epoch-rollover.timer
 ```
 
-The timer runs `epoch rollover --export-closed` daily; it is a no-op until
-the open epoch reaches its max age, then it closes the epoch, exports it
-(CSVs + SQL dump + SHA-256 manifest), and opens the next one (label
-auto-incremented, e.g. `2026-Q4` → `2026-Q4-02`). The running crawler
-detects the rollover on its next cycle and switches to the new epoch, and
-it also rolls over by itself as a backstop if the timer ever misses
-(the backstop rolls without exporting, same as before).
-Set `EPOCH_AUTO_ROLLOVER=false` to return to fully manual epochs.
+The timer runs `epoch rollover --export-closed` daily. The rollover step
+is a no-op until the open epoch reaches its max age, then it closes the
+epoch and opens the next one (label auto-incremented, e.g. `2026-Q4` →
+`2026-Q4-02`) in one transaction. The running crawler on VM1 performs the
+same idempotent check every cycle as a backstop — and in practice it
+usually rolls first, minutes after the epoch turns due, without exporting.
+
+So the export step does not depend on who rolled: `--export-closed`
+exports **every CLOSED epoch that has no `manifest.json` under
+`EXPORT_DIR` yet** (CSVs + SQL dump + SHA-256 manifest). Labels are read
+from the manifests themselves; a crashed export (directory without a
+manifest) is retried on the next run; re-running exports nothing new. If
+any export fails the unit exits non-zero, so `systemctl --failed` shows
+it. Set `EPOCH_AUTO_ROLLOVER=false` to return to fully manual epochs.
+
+Note: the first VM2 run also exports epochs that were closed before this
+change, if their exports only exist on VM1 (VM2's `EXPORT_DIR` has no
+manifest for them). The `sites`/`epochs` CSVs are global tables
+snapshotted at export time, so an export that runs up to a day after the
+close reflects that day's `sites` state.
 
 Manual rollover (if ever needed):
 
@@ -249,8 +276,15 @@ A dark "Mission Control" ops console for watching the campaign live.
 It runs next to MariaDB on VM2, reads the live database **read-only**
 (SELECTs only, never writes), and shows:
 
-- **Status bar**: crawler liveness (ALIVE/STALE/DEAD, pulsing pill), open
-  epoch label, epoch age, days until auto-rollover, last heartbeat.
+- **Status bar**: crawler liveness (ALIVE / STALLED / STALE / DEAD,
+  pulsing pill), open epoch label, epoch age, days until auto-rollover,
+  last heartbeat, last fetch, last progress and the current loop phase.
+  ALIVE = fresh heartbeat and recent progress; STALLED = fresh heartbeat
+  but no completed work for longer than the crawler's `stall_after_seconds`
+  (the process is up but wedged — the phase shows where); STALE / DEAD =
+  heartbeats themselves are late (process hung or down). Every database
+  string rendered server-side is HTML-escaped: site hosts come from links
+  on crawled eepsites and can contain markup.
 - **KPI cards**: verify/crawl attempts + success rates, pages fetched,
   links found.
 - **Cohort grid**: site counts across all 10 states.
@@ -325,7 +359,7 @@ python -m xl_i2p --version
 
 ## Tests
 
-`python -m pytest tests/ -q` — 110 tests, no real network (httpx mocked,
+`python -m pytest tests/ -q` — 139 tests (+16 in `vps_harvester/tests`), no real network (httpx mocked,
 SQLite). Covers janitor recovery, backoff, taxonomy, epoch tagging and
 rollover, seed dedup, page-cap strictness, kill-mid-cycle restart
 simulation, the cross-layer association loop (pass selection,
